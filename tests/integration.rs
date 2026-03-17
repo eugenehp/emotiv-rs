@@ -6,6 +6,9 @@ use emotiv::simulator::{SimulatorConfig, spawn_simulator};
 #[cfg(feature = "simulate")]
 use tokio::sync::mpsc;
 
+mod common;
+use common::mock_cortex::spawn_mock_cortex_server;
+
 // ── Simulator integration ─────────────────────────────────────────────────────
 
 #[cfg(feature = "simulate")]
@@ -260,6 +263,116 @@ fn marker_deserialize_from_cortex_json() {
     assert_eq!(m.label, "trial_1");
     assert_eq!(m.value, "stimulus_A");
     assert!(m.extra.contains_key("port"));
+}
+
+#[tokio::test]
+async fn client_can_run_against_mock_server() {
+    let ws_url = spawn_mock_cortex_server(false).await;
+
+    let client = CortexClient::new(CortexClientConfig {
+        client_id: "mock-id".into(),
+        client_secret: "mock-secret".into(),
+        ws_url,
+        ..Default::default()
+    });
+
+    let (mut rx, handle) = client.connect().await.unwrap();
+
+    let mut seen_authorized = false;
+    let mut seen_session = false;
+    let mut seen_labels = false;
+    let mut seen_eeg = false;
+    let mut seen_cortex_info = false;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break,
+            ev = rx.recv() => {
+                match ev {
+                    Some(CortexEvent::Authorized) => seen_authorized = true,
+                    Some(CortexEvent::SessionCreated(_)) => {
+                        seen_session = true;
+                        handle.subscribe(&["eeg"]).await.unwrap();
+                        handle.get_cortex_info().await.unwrap();
+                    }
+                    Some(CortexEvent::DataLabels(_)) => seen_labels = true,
+                    Some(CortexEvent::Eeg(_)) => seen_eeg = true,
+                    Some(CortexEvent::CortexInfo(_)) => {
+                        seen_cortex_info = true;
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        }
+    }
+
+    assert!(seen_authorized, "mock flow should authorize");
+    assert!(seen_session, "mock flow should create session");
+    assert!(seen_labels, "mock flow should emit stream labels");
+    assert!(seen_eeg, "mock flow should emit eeg data");
+    assert!(seen_cortex_info, "mock flow should emit CortexInfo response");
+}
+
+#[tokio::test]
+async fn resilient_client_reconnects_with_mock_server() {
+    let ws_url = spawn_mock_cortex_server(true).await;
+
+    let config = CortexConfig {
+        client_id: "mock-id".into(),
+        client_secret: "mock-secret".into(),
+        cortex_url: ws_url,
+        auto_create_session: true,
+        reconnect: emotiv::config::ReconnectConfig {
+            enabled: true,
+            base_delay_secs: 0,
+            max_delay_secs: 1,
+            max_attempts: 3,
+        },
+        health: emotiv::config::HealthConfig {
+            enabled: false,
+            interval_secs: 30,
+            max_consecutive_failures: 3,
+        },
+        ..CortexConfig::new("mock-id", "mock-secret")
+    };
+
+    let (client, mut events) = ResilientClient::connect(config).await.unwrap();
+    let mut conn_events = client.connection_event_receiver();
+
+    let mut saw_reconnecting = false;
+    let mut saw_reconnected = false;
+    let mut saw_second_session = false;
+    let mut session_count = 0_u32;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break,
+            Ok(conn_ev) = conn_events.recv() => {
+                match conn_ev {
+                    emotiv::reconnect::ConnectionEvent::Reconnecting { .. } => saw_reconnecting = true,
+                    emotiv::reconnect::ConnectionEvent::Reconnected => saw_reconnected = true,
+                    _ => {}
+                }
+            }
+            Ok(ev) = events.recv() => {
+                if let CortexEvent::SessionCreated(_) = ev {
+                    session_count += 1;
+                    if session_count >= 2 {
+                        saw_second_session = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(saw_reconnecting, "should emit reconnecting event");
+    assert!(saw_reconnected, "should emit reconnected event");
+    assert!(saw_second_session, "should establish a second session after reconnect");
 }
 
 #[test]

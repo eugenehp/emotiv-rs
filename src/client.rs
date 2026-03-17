@@ -336,6 +336,11 @@ impl CortexHandle {
         self.send_raw(close_session(&s.auth_token, &s.session_id)).await
     }
 
+    /// Get Cortex service info.
+    pub async fn get_cortex_info(&self) -> Result<()> {
+        self.send_raw(get_cortex_info()).await
+    }
+
     /// Get the current auth token.
     pub async fn auth_token(&self) -> String {
         self.state.lock().await.auth_token.clone()
@@ -541,7 +546,8 @@ async fn handle_message(
         let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("unknown");
         let code = error.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
         warn!("Cortex error (code={code}): {msg}");
-        let _ = event_tx.send(CortexEvent::Error(format!("code={code}: {msg}"))).await;
+        let cortex_err = crate::error::CortexError::from_api_error(code as i32, msg);
+        let _ = event_tx.send(CortexEvent::Error(cortex_err.to_string())).await;
         return responses;
     }
 
@@ -815,6 +821,10 @@ async fn handle_result(
 
         REQUEST_DOWNLOAD_RECORDS_ID => {
             let _ = event_tx.send(CortexEvent::DownloadRecordsDone(result.clone())).await;
+        }
+
+        GET_CORTEX_INFO_ID => {
+            let _ = event_tx.send(CortexEvent::CortexInfo(result.clone())).await;
         }
 
         SYNC_WITH_HEADSET_CLOCK_ID => {

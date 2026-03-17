@@ -204,6 +204,8 @@ pub enum CortexEvent {
     Sys(SysData),
     /// Data labels for a subscribed stream.
     DataLabels(DataLabels),
+    /// Cortex service info (response to getCortexInfo health ping).
+    CortexInfo(serde_json::Value),
 
     // ── Records & markers ────────────────────────────────────────────────
     /// Record created.

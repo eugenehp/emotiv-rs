@@ -95,6 +95,8 @@ cargo run --bin emotiv-tui
 
 # Examples
 cargo run --example sub_data
+cargo run --example client_mode
+cargo run --example client_mode -- --resilient
 cargo run --example record
 cargo run --example marker
 cargo run --example mental_command_train
@@ -144,6 +146,40 @@ async fn main() -> anyhow::Result<()> {
             _ => {}
         }
     }
+    Ok(())
+}
+```
+
+### Resilient client (auto-reconnect + health checks)
+
+```rust
+use emotiv::prelude::*;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Loads from cortex.toml or EMOTIV_CLIENT_ID / EMOTIV_CLIENT_SECRET
+    let config = CortexConfig::discover(None)?;
+
+    let (client, mut events) = ResilientClient::connect(config).await?;
+
+    let mut conn_events = client.connection_event_receiver();
+    tokio::spawn(async move {
+        while let Ok(event) = conn_events.recv().await {
+            println!("Connection event: {:?}", event);
+        }
+    });
+
+    while let Ok(event) = events.recv().await {
+        match event {
+            CortexEvent::SessionCreated(_) => {
+                // Re-subscribe after each reconnect (session changes)
+                client.subscribe(&["eeg", "met"]).await?;
+            }
+            CortexEvent::Disconnected => break,
+            _ => {}
+        }
+    }
+
     Ok(())
 }
 ```

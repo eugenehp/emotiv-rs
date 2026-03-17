@@ -82,7 +82,12 @@
 //! | [`simulator`] | Signal simulator for offline testing *(feature = `simulate`)* |
 
 pub mod client;
+pub mod config;
+pub mod error;
+pub mod health;
 pub mod protocol;
+pub mod reconnect;
+pub mod retry;
 #[cfg(feature = "simulate")]
 pub mod simulator;
 pub mod types;
@@ -99,6 +104,9 @@ pub mod types;
 /// stream-name constants (`STREAM_EEG`, `STREAM_MOT`, …).
 pub mod prelude {
     pub use crate::client::{CortexClient, CortexClientConfig, CortexHandle};
+    pub use crate::config::CortexConfig;
+    pub use crate::error::{CortexError, CortexResult};
+    pub use crate::reconnect::{ConnectionEvent, ResilientClient};
     pub use crate::types::*;
     pub use crate::protocol::{
         EEG_FREQUENCY,
