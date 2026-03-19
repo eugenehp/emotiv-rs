@@ -2,9 +2,19 @@
 
 use crate::raw::decryption::Decryptor;
 use crate::raw::types::{DecryptedData, HeadsetModel, DeviceState};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+#[cfg(feature = "raw")]
+use btleplug::api::{
+    Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter,
+};
+#[cfg(feature = "raw")]
+use btleplug::platform::{Manager, Peripheral};
+#[cfg(feature = "raw")]
+use futures_util::StreamExt;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+#[cfg(feature = "raw")]
+use uuid::Uuid;
 
 /// Device transport type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,11 +107,6 @@ impl RawDevice {
             devices.extend(discover_usb_devices().await.unwrap_or_default());
         }
 
-        // If no real devices, return mock devices for testing
-        if devices.is_empty() {
-            devices = create_mock_devices();
-        }
-
         Ok(devices)
     }
 
@@ -142,71 +147,122 @@ async fn connect_and_stream(
     tx: mpsc::Sender<DecryptedData>,
     state: Arc<RwLock<DeviceState>>,
 ) -> Result<()> {
+    #[cfg(not(feature = "raw"))]
+    {
+        let _ = info;
+        let _ = tx;
+        let _ = state;
+        return Err(anyhow!("raw feature is disabled"));
+    }
+
+    #[cfg(feature = "raw")]
+    {
     let mut device_state = state.write().await;
     *device_state = DeviceState::Connecting;
     drop(device_state);
 
-    // Create decryptor
-    let _decryptor = Decryptor::new(info.model, info.serial.clone())?;
+    let adapter = default_adapter().await?;
+    let peripheral = find_peripheral_by_address(&adapter, &info.address)
+        .await?
+        .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?;
 
-    // Simulate data streaming (would connect to real device in production)
+    if !peripheral.is_connected().await.unwrap_or(false) {
+        peripheral.connect().await?;
+    }
+    peripheral.discover_services().await?;
+
+    let mut decryptor = Decryptor::new(info.model, normalize_serial_12(&info.serial))?;
+
+    let notify_chars = select_notify_characteristics(&peripheral);
+    if notify_chars.is_empty() {
+        return Err(anyhow!("No notifiable BLE characteristics found for device"));
+    }
+
+    for ch in &notify_chars {
+        if let Err(err) = peripheral.subscribe(ch).await {
+            log::warn!("Failed to subscribe {}: {}", ch.uuid, err);
+        }
+    }
+
+    let mut notifications = peripheral.notifications().await?;
+
     let mut device_state = state.write().await;
-    *device_state = DeviceState::Connected;
+    *device_state = DeviceState::Streaming;
     drop(device_state);
 
-    // Generate mock data for demo
-    for counter in 0..1000 {
-        if matches!(*state.read().await, DeviceState::Disconnecting | DeviceState::Disconnected) {
+    loop {
+        if matches!(
+            *state.read().await,
+            DeviceState::Disconnecting | DeviceState::Disconnected
+        ) {
             break;
         }
 
-        // Generate synthetic EEG data
-        let channel_count = info.model.channel_count();
-        let eeg_adc: Vec<u16> = (0..channel_count)
-            .map(|i| {
-                let phase = (counter as f64 * 0.1 + i as f64) % (2.0 * std::f64::consts::PI);
-                ((8000.0 + 4000.0 * phase.sin()) as u16).clamp(0, 16383)
-            })
-            .collect();
+        match notifications.next().await {
+            Some(notification) => {
+                let payload = notification.value;
+                if payload.is_empty() {
+                    continue;
+                }
 
-        let eeg_uv = eeg_adc
-            .iter()
-            .map(|&v| {
-                let normalized = v as f64 / 16383.0;
-                -8399.0 + normalized * 16798.0
-            })
-            .collect();
-
-        let contact_quality = vec![4; channel_count]; // Good contact
-
-        let data = DecryptedData::new(
-            counter,
-            eeg_uv,
-            eeg_adc.iter().map(|&x| x as i32).collect(),
-            contact_quality,
-            4,
-            75,
-        );
-
-        if tx.send(data).await.is_err() {
-            break;
+                match decryptor.decrypt_eeg_packet(&payload) {
+                    Ok(data) => {
+                        if tx.send(data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::debug!("Failed to decrypt packet: {}", err);
+                    }
+                }
+            }
+            None => break,
         }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;
     }
+
+    let _ = peripheral.disconnect().await;
 
     let mut device_state = state.write().await;
     *device_state = DeviceState::Disconnected;
 
     Ok(())
+    }
 }
 
 /// Discover BLE devices (returns empty if feature disabled).
 #[cfg(feature = "raw")]
 async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
-    // Use btleplug to scan for BLE devices
-    // For now, return empty - would be implemented with btleplug
-    Ok(Vec::new())
+    let adapter = default_adapter().await?;
+    adapter.start_scan(ScanFilter::default()).await?;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    let mut devices = Vec::new();
+    for peripheral in adapter.peripherals().await? {
+        let Some(props) = peripheral.properties().await? else {
+            continue;
+        };
+
+        let name = props.local_name.unwrap_or_default();
+        if !is_emotiv_candidate(&name, &props.services) {
+            continue;
+        }
+
+        let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocX);
+        let address = peripheral.id().to_string();
+        let serial = infer_serial(&name, &address);
+
+        devices.push(DeviceInfo {
+            address,
+            serial,
+            model,
+            transport: TransportType::Ble,
+            battery_percent: 0,
+            is_connected: peripheral.is_connected().await.unwrap_or(false),
+        });
+    }
+
+    adapter.stop_scan().await.ok();
+    Ok(devices)
 }
 
 #[cfg(not(feature = "raw"))]
@@ -227,26 +283,138 @@ async fn discover_usb_devices() -> Result<Vec<DeviceInfo>> {
     Ok(Vec::new())
 }
 
-/// Create mock devices for testing/demo.
-fn create_mock_devices() -> Vec<DeviceInfo> {
-    vec![
-        DeviceInfo {
-            address: "C3:E4:51:8B:4E:20".to_string(),
-            serial: "MOCK-SN-000001".to_string(),
-            model: HeadsetModel::EpocX,
-            transport: TransportType::Ble,
-            battery_percent: 85,
-            is_connected: false,
-        },
-        DeviceInfo {
-            address: "8B:4E:20:C3:E4:51".to_string(),
-            serial: "MOCK-SN-000002".to_string(),
-            model: HeadsetModel::Insight2,
-            transport: TransportType::Ble,
-            battery_percent: 65,
-            is_connected: false,
-        },
-    ]
+#[cfg(feature = "raw")]
+async fn default_adapter() -> Result<btleplug::platform::Adapter> {
+    let manager = Manager::new().await?;
+    let adapters = manager.adapters().await?;
+    adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("No BLE adapter available"))
+}
+
+#[cfg(feature = "raw")]
+async fn find_peripheral_by_address(
+    adapter: &btleplug::platform::Adapter,
+    address: &str,
+) -> Result<Option<Peripheral>> {
+    for p in adapter.peripherals().await? {
+        if p.id().to_string() == address {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "raw")]
+fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::Characteristic> {
+    const EMOTIV_DATA_SERVICE: &str = "00001100-d102-11e1-9b23-00025b00a5a5";
+
+    let data_uuid = Uuid::parse_str(EMOTIV_DATA_SERVICE).ok();
+    let all: Vec<_> = peripheral.characteristics().into_iter().collect();
+
+    let mut preferred: Vec<_> = all
+        .iter()
+        .filter(|ch| {
+            ch.properties.contains(CharPropFlags::NOTIFY)
+                && data_uuid
+                    .map(|svc| ch.service_uuid == svc)
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
+    if preferred.is_empty() {
+        preferred = all
+            .into_iter()
+            .filter(|ch| ch.properties.contains(CharPropFlags::NOTIFY))
+            .collect();
+    }
+
+    preferred
+}
+
+#[cfg(feature = "raw")]
+fn is_emotiv_candidate(name: &str, services: &[Uuid]) -> bool {
+    let lname = name.to_ascii_lowercase();
+    if lname.contains("emotiv")
+        || lname.contains("epoc")
+        || lname.contains("insight")
+        || lname.contains("flex")
+        || lname.contains("mn8")
+        || lname.contains("xtrodes")
+    {
+        return true;
+    }
+
+    services.iter().any(|u| {
+        let s = u.to_string().to_ascii_lowercase();
+        s.starts_with("00001100-d102-11e1-9b23-00025b00a5a5")
+            || s.starts_with("00001101-d102-11e1-9b23-00025b00a5a5")
+            || s.starts_with("00001102-d102-11e1-9b23-00025b00a5a5")
+    })
+}
+
+#[cfg(feature = "raw")]
+fn infer_model_from_name(name: &str) -> Option<HeadsetModel> {
+    let n = name.to_ascii_lowercase();
+    if n.contains("insight 2") || n.contains("insight2") {
+        Some(HeadsetModel::Insight2)
+    } else if n.contains("insight") {
+        Some(HeadsetModel::Insight)
+    } else if n.contains("epoc flex") || n.contains("flex") {
+        Some(HeadsetModel::EpocFlex)
+    } else if n.contains("epoc+") || n.contains("epoc plus") {
+        Some(HeadsetModel::EpocPlus)
+    } else if n.contains("epoc x") {
+        Some(HeadsetModel::EpocX)
+    } else if n.contains("epoc") {
+        Some(HeadsetModel::EpocStd)
+    } else if n.contains("mn8") {
+        Some(HeadsetModel::MN8)
+    } else if n.contains("xtrodes") {
+        Some(HeadsetModel::Xtrodes)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "raw")]
+fn infer_serial(name: &str, address: &str) -> String {
+    let suffix_from_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .rev()
+        .take(12)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    if suffix_from_name.len() >= 12 {
+        return suffix_from_name;
+    }
+
+    normalize_serial_12(address)
+}
+
+#[cfg(feature = "raw")]
+fn normalize_serial_12(input: &str) -> String {
+    let mut chars: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+
+    if chars.len() >= 12 {
+        chars.truncate(12);
+        return chars;
+    }
+
+    while chars.len() < 12 {
+        chars.push('0');
+    }
+    chars
 }
 
 #[cfg(test)]
@@ -254,34 +422,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_mock_devices() {
-        let devices = RawDevice::discover().await.unwrap();
-        assert!(!devices.is_empty());
-        assert_eq!(devices[0].model, HeadsetModel::EpocX);
+    async fn test_discover_does_not_fail() {
+        let _ = RawDevice::discover().await;
     }
 
     #[tokio::test]
-    async fn test_device_connection() -> Result<()> {
-        let info = DeviceInfo {
-            address: "test".to_string(),
-            serial: "TEST-SN-000001".to_string(),
-            model: HeadsetModel::EpocX,
-            transport: TransportType::Ble,
-            battery_percent: 80,
-            is_connected: false,
-        };
-
-        let device = RawDevice::from_info(info);
-        let (mut rx, _handle) = device.connect().await?;
-
-        // Should receive at least one packet
-        let packet = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx.recv(),
-        )
-        .await??;
-
-        assert!(!packet.eeg_uv.is_empty());
-        Ok(())
+    async fn test_model_inference() {
+        #[cfg(feature = "raw")]
+        {
+            assert_eq!(infer_model_from_name("EMOTIV EPOC X"), Some(HeadsetModel::EpocX));
+            assert_eq!(infer_model_from_name("Insight 2"), Some(HeadsetModel::Insight2));
+        }
     }
 }
