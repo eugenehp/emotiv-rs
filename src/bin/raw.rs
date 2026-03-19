@@ -13,10 +13,14 @@
 //!
 //! # Connect to first discovered device
 //! cargo run --bin emotiv-raw --features raw
+//!
+//! # Decode audit mode (live decode sanity scoring)
+//! cargo run --bin emotiv-raw --features raw -- --decode-audit
 //! ```
 
 use anyhow::Result;
 use log::{error, info};
+use std::collections::VecDeque;
 use std::io::{self, BufRead};
 
 #[cfg(feature = "raw")]
@@ -35,6 +39,7 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     let debug_view = args.contains(&"--debug-view".to_string());
+    let decode_audit = args.contains(&"--decode-audit".to_string());
 
     // Handle --list flag
     if args.contains(&"--list".to_string()) {
@@ -57,8 +62,8 @@ async fn main() -> Result<()> {
     #[cfg(feature = "raw")]
     {
         match device_address {
-            Some(addr) => connect_to_device(&addr, debug_view).await?,
-            None => connect_to_first_device(debug_view).await?,
+            Some(addr) => connect_to_device(&addr, debug_view, decode_audit).await?,
+            None => connect_to_first_device(debug_view, decode_audit).await?,
         }
     }
 
@@ -105,7 +110,7 @@ async fn list_devices() -> Result<()> {
 }
 
 #[cfg(feature = "raw")]
-async fn connect_to_first_device(debug_view: bool) -> Result<()> {
+async fn connect_to_first_device(debug_view: bool, decode_audit: bool) -> Result<()> {
     info!("Discovering Emotiv devices...");
     let devices = raw::discover_devices().await?;
 
@@ -125,12 +130,12 @@ async fn connect_to_first_device(debug_view: bool) -> Result<()> {
         device.transport
     );
 
-    stream_device(device.clone(), debug_view).await?;
+    stream_device(device.clone(), debug_view, decode_audit).await?;
     Ok(())
 }
 
 #[cfg(feature = "raw")]
-async fn connect_to_device(address: &str, debug_view: bool) -> Result<()> {
+async fn connect_to_device(address: &str, debug_view: bool, decode_audit: bool) -> Result<()> {
     let devices = raw::discover_devices().await?;
     let device = devices
         .iter()
@@ -146,12 +151,14 @@ async fn connect_to_device(address: &str, debug_view: bool) -> Result<()> {
         device.transport
     );
 
-    stream_device(device.clone(), debug_view).await?;
+    stream_device(device.clone(), debug_view, decode_audit).await?;
     Ok(())
 }
 
 #[cfg(feature = "raw")]
-async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> {
+async fn stream_device(device: raw::DeviceInfo, debug_view: bool, decode_audit: bool) -> Result<()> {
+    let (_, model_uv_max) = device.model.eeg_physical_range();
+    let model_channel_count = device.model.channel_count();
     let (mut rx, handle) = raw::RawDevice::from_info(device).connect().await?;
 
     info!("✅ Connected! Streaming EEG data...");
@@ -180,8 +187,24 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
         println!("│ DEBUG view enabled: showing rx/decode counters every 2s            │");
         println!("├────────────────────────────────────────────────────────────────────┤");
     }
+    if decode_audit {
+        println!("│ DECODE AUDIT enabled: continuity/clip/rms/correlation checks       │");
+        println!("├────────────────────────────────────────────────────────────────────┤");
+    }
 
     let mut debug_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut audit_tick = tokio::time::interval(std::time::Duration::from_secs(3));
+
+    let mut prev_counter: Option<u32> = None;
+    let mut counter_jumps = 0u64;
+    let mut sample_count = 0u64;
+    let mut clipped_count = 0u64;
+    let mut abs_sum = 0.0f64;
+    let mut sq_sum = 0.0f64;
+    let audit_ch = 4usize.min(model_channel_count).max(1);
+    let mut corr_hist: Vec<VecDeque<f64>> = (0..audit_ch)
+        .map(|_| VecDeque::with_capacity(512))
+        .collect();
 
     loop {
         tokio::select! {
@@ -210,8 +233,77 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
                     );
                 }
             }
+            _ = audit_tick.tick(), if decode_audit => {
+                let continuity = if packet_count == 0 {
+                    0.0
+                } else {
+                    1.0 - (counter_jumps as f64 / packet_count as f64)
+                };
+
+                let clip_rate = if sample_count == 0 {
+                    0.0
+                } else {
+                    clipped_count as f64 / sample_count as f64
+                };
+
+                let mean_abs = if sample_count == 0 {
+                    0.0
+                } else {
+                    abs_sum / sample_count as f64
+                };
+
+                let rms = if sample_count == 0 {
+                    0.0
+                } else {
+                    (sq_sum / sample_count as f64).sqrt()
+                };
+
+                let corr = average_pairwise_corr(&corr_hist).unwrap_or(0.0);
+
+                let verdict = if continuity > 0.99 && clip_rate < 0.02 && rms < 300.0 && corr.abs() > 0.02 {
+                    "GOOD"
+                } else if continuity > 0.95 && clip_rate < 0.10 && rms < 1200.0 {
+                    "WARN"
+                } else {
+                    "BAD"
+                };
+
+                println!(
+                    "│ AUDIT {verdict:<4} cont={:.3} clip={:.1}% mean|uV|={:.1} rms={:.1} corr={:.3}",
+                    continuity,
+                    clip_rate * 100.0,
+                    mean_abs,
+                    rms,
+                    corr,
+                );
+            }
             Some(data) = rx.recv() => {
                 packet_count += 1;
+
+                if let Some(prev) = prev_counter {
+                    let expected = (prev + 1) & 0xFFFF;
+                    if data.counter != expected {
+                        counter_jumps += 1;
+                    }
+                }
+                prev_counter = Some(data.counter);
+
+                for (ch_idx, value) in data.eeg_uv.iter().enumerate() {
+                    if value.abs() >= model_uv_max * 0.98 {
+                        clipped_count += 1;
+                    }
+                    abs_sum += value.abs();
+                    sq_sum += value * value;
+                    sample_count += 1;
+
+                    if ch_idx < audit_ch {
+                        let hist = &mut corr_hist[ch_idx];
+                        hist.push_back(*value);
+                        while hist.len() > 512 {
+                            hist.pop_front();
+                        }
+                    }
+                }
 
                 // Show every 16th packet (roughly 2x per second at 128 Hz)
                 if packet_count % 16 == 0 {
@@ -257,6 +349,71 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
     println!("└────────────────────────────────────────────────────────────────────┘");
 
     Ok(())
+}
+
+#[cfg(feature = "raw")]
+fn average_pairwise_corr(ch_hist: &[VecDeque<f64>]) -> Option<f64> {
+    if ch_hist.len() < 2 {
+        return None;
+    }
+
+    let min_len = ch_hist.iter().map(|h| h.len()).min().unwrap_or(0);
+    if min_len < 64 {
+        return None;
+    }
+
+    let mut total = 0.0f64;
+    let mut pairs = 0u32;
+    for i in 0..ch_hist.len() {
+        for j in (i + 1)..ch_hist.len() {
+            if let Some(c) = pearson_tail(&ch_hist[i], &ch_hist[j], min_len.min(256)) {
+                total += c;
+                pairs += 1;
+            }
+        }
+    }
+
+    if pairs == 0 {
+        None
+    } else {
+        Some(total / pairs as f64)
+    }
+}
+
+#[cfg(feature = "raw")]
+fn pearson_tail(a: &VecDeque<f64>, b: &VecDeque<f64>, n: usize) -> Option<f64> {
+    if n == 0 || a.len() < n || b.len() < n {
+        return None;
+    }
+
+    let a_start = a.len() - n;
+    let b_start = b.len() - n;
+    let mut sum_a = 0.0;
+    let mut sum_b = 0.0;
+    for k in 0..n {
+        sum_a += a[a_start + k];
+        sum_b += b[b_start + k];
+    }
+    let mean_a = sum_a / n as f64;
+    let mean_b = sum_b / n as f64;
+
+    let mut num = 0.0;
+    let mut den_a = 0.0;
+    let mut den_b = 0.0;
+    for k in 0..n {
+        let da = a[a_start + k] - mean_a;
+        let db = b[b_start + k] - mean_b;
+        num += da * db;
+        den_a += da * da;
+        den_b += db * db;
+    }
+
+    let den = (den_a * den_b).sqrt();
+    if den < 1e-9 {
+        None
+    } else {
+        Some((num / den).clamp(-1.0, 1.0))
+    }
 }
 
 #[cfg(feature = "raw")]
