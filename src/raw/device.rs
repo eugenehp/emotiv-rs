@@ -585,6 +585,7 @@ async fn find_peripheral(
         .map(normalize_id)
         .unwrap_or_default();
     let target_name = normalize_id(&info.name);
+    let target_serial = normalize_serial_12(&info.serial);
 
     let mut scored: Vec<(i32, Peripheral)> = Vec::new();
 
@@ -601,11 +602,24 @@ async fn find_peripheral(
             .and_then(|x| x.local_name.as_ref())
             .map(|n| normalize_id(n))
             .unwrap_or_default();
+        let inferred_serial = {
+            let name = props
+                .as_ref()
+                .and_then(|x| x.local_name.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let addr = props
+                .as_ref()
+                .map(|x| x.address.to_string())
+                .unwrap_or_else(|| pid.clone());
+            normalize_serial_12(&infer_serial(&name, &addr))
+        };
 
         let exact = (!target_id.is_empty() && pid_norm == target_id)
             || (!target_ble_id.is_empty() && pid_norm == target_ble_id)
             || (!target_mac.is_empty() && !mac_norm.is_empty() && target_mac == mac_norm)
-            || (!target_name.is_empty() && !name_norm.is_empty() && target_name == name_norm);
+            || (!target_name.is_empty() && !name_norm.is_empty() && target_name == name_norm)
+            || (!target_serial.is_empty() && inferred_serial == target_serial);
 
         if exact {
             return Ok(Some(p));
@@ -618,6 +632,12 @@ async fn find_peripheral(
                 score += 80;
             } else if name_norm.contains(&target_name) || target_name.contains(&name_norm) {
                 score += 45;
+            }
+        }
+
+        if !target_serial.is_empty() && !inferred_serial.is_empty() {
+            if inferred_serial == target_serial {
+                score += 85;
             }
         }
 
@@ -791,9 +811,9 @@ fn is_emotiv_candidate(
         return true;
     }
 
-    // Connected devices are not necessarily Emotiv; do not accept by connected-only.
-    let _ = is_connected;
-    false
+    // Accept already-connected peripherals as candidates to avoid missing headsets
+    // whose advertising payload is sparse/stripped by platform BLE stacks.
+    is_connected
 }
 
 #[cfg(feature = "raw")]
