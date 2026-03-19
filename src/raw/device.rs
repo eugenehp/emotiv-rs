@@ -12,6 +12,8 @@ use btleplug::platform::{Manager, Peripheral};
 #[cfg(feature = "raw")]
 use futures_util::StreamExt;
 use std::sync::Arc;
+#[cfg(feature = "raw")]
+use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
 #[cfg(feature = "raw")]
 use uuid::Uuid;
@@ -252,6 +254,8 @@ async fn connect_and_stream(
     let mut decrypted_packets = 0u64;
     let mut active_notify_uuid: Option<Uuid> = None;
     let min_payload_len = min_payload_len_for_model(info.model);
+    let expected_packet_len = expected_packet_len_for_model(info.model);
+    let mut notification_buffers: HashMap<Uuid, Vec<u8>> = HashMap::new();
     let required_channels = required_channels_for_model(info.model);
     let fallback_required_channels = fallback_required_channels_for_model(info.model);
     let mut partial_hits = vec![0u8; decryptors.len()];
@@ -278,99 +282,124 @@ async fn connect_and_stream(
                     }
                 }
 
-                let mut decoded = None;
-                if let Some(idx) = active_decryptor_idx {
-                    if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&payload) {
-                        let ok_len = data.eeg_uv.len() >= fallback_required_channels;
-                        if ok_len {
-                            decoded = Some(data);
-                        }
+                let mut candidate_packets: Vec<Vec<u8>> = Vec::new();
+                {
+                    let buffer = notification_buffers.entry(notification.uuid).or_default();
+                    buffer.extend_from_slice(&payload);
+
+                    while buffer.len() >= expected_packet_len {
+                        candidate_packets.push(buffer.drain(..expected_packet_len).collect());
+                    }
+
+                    if buffer.len() > expected_packet_len * 4 {
+                        let keep = expected_packet_len * 2;
+                        let drop_len = buffer.len().saturating_sub(keep);
+                        buffer.drain(..drop_len);
                     }
                 }
 
-                if decoded.is_none() {
-                    for (idx, (_, decryptor, _)) in decryptors.iter_mut().enumerate() {
-                        if Some(idx) == active_decryptor_idx {
-                            continue;
+                if candidate_packets.is_empty() {
+                    continue;
+                }
+
+                for packet in candidate_packets {
+                    let mut decoded: Option<DecryptedData> = None;
+
+                    if let Some(idx) = active_decryptor_idx {
+                        if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&packet) {
+                            if data.eeg_uv.len() >= fallback_required_channels {
+                                decoded = Some(data);
+                            }
                         }
-                        if let Ok(data) = decryptor.decrypt_eeg_packet(&payload) {
-                            let channels = data.eeg_uv.len();
-                            if channels < fallback_required_channels {
+                    }
+
+                    if decoded.is_none() {
+                        for (idx, (_, decryptor, _)) in decryptors.iter_mut().enumerate() {
+                            if Some(idx) == active_decryptor_idx {
                                 continue;
                             }
 
-                            let is_partial = if channels < required_channels {
-                                partial_hits[idx] = partial_hits[idx].saturating_add(1);
-                                if partial_hits[idx] < 6 {
+                            if let Ok(data) = decryptor.decrypt_eeg_packet(&packet) {
+                                let channels = data.eeg_uv.len();
+                                if channels < fallback_required_channels {
                                     continue;
                                 }
-                                true
-                            } else {
-                                false
-                            };
 
-                            active_decryptor_idx = Some(idx);
-                            log::info!(
-                                "Decryption synchronized with serial/model candidate: {}/{}{}",
-                                decryptors[idx].0,
-                                decryptors[idx].2.name(),
-                                if is_partial { " (partial mode)" } else { "" }
-                            );
-                            {
-                                let mut s = debug_stats.write().await;
-                                s.active_serial_candidate = Some(format!(
-                                    "{}/{}{}",
+                                let is_partial = if channels < required_channels {
+                                    partial_hits[idx] = partial_hits[idx].saturating_add(1);
+                                    if partial_hits[idx] < 6 {
+                                        continue;
+                                    }
+                                    true
+                                } else {
+                                    false
+                                };
+
+                                active_decryptor_idx = Some(idx);
+                                log::info!(
+                                    "Decryption synchronized with serial/model candidate: {}/{}{}",
                                     decryptors[idx].0,
                                     decryptors[idx].2.name(),
-                                    if is_partial { ":partial" } else { "" }
+                                    if is_partial { " (partial mode)" } else { "" }
+                                );
+                                {
+                                    let mut s = debug_stats.write().await;
+                                    s.active_serial_candidate = Some(format!(
+                                        "{}/{}{}",
+                                        decryptors[idx].0,
+                                        decryptors[idx].2.name(),
+                                        if is_partial { ":partial" } else { "" }
+                                    ));
+                                }
+                                decoded = Some(data);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(data) = decoded {
+                        decrypted_packets += 1;
+                        let is_full_decode = data.eeg_uv.len() >= required_channels;
+                        if active_notify_uuid.is_none() && is_full_decode {
+                            active_notify_uuid = Some(notification.uuid);
+                            log::info!("Locked active EEG notify UUID: {}", notification.uuid);
+                            if let Some(idx) = active_decryptor_idx {
+                                let mut s = debug_stats.write().await;
+                                s.active_serial_candidate = Some(format!(
+                                    "{}/{}",
+                                    decryptors[idx].0,
+                                    decryptors[idx].2.name()
                                 ));
                             }
-                            decoded = Some(data);
+                        }
+
+                        {
+                            let mut s = debug_stats.write().await;
+                            s.received_notifications = received_packets;
+                            s.decoded_packets = decrypted_packets;
+                            s.last_notify_uuid = Some(notification.uuid.to_string());
+                            s.last_payload_len = payload.len();
+                            s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
+                        }
+
+                        if tx.send(data).await.is_err() {
                             break;
                         }
-                    }
-                }
-
-                if let Some(data) = decoded {
-                    decrypted_packets += 1;
-                    let is_full_decode = data.eeg_uv.len() >= required_channels;
-                    if active_notify_uuid.is_none() && is_full_decode {
-                        active_notify_uuid = Some(notification.uuid);
-                        log::info!("Locked active EEG notify UUID: {}", notification.uuid);
-                        if let Some(idx) = active_decryptor_idx {
+                    } else if received_packets % 50 == 0 {
+                        {
                             let mut s = debug_stats.write().await;
-                            s.active_serial_candidate = Some(format!(
-                                "{}/{}",
-                                decryptors[idx].0,
-                                decryptors[idx].2.name()
-                            ));
+                            s.received_notifications = received_packets;
+                            s.decoded_packets = decrypted_packets;
+                            s.decrypt_failures += 1;
+                            s.last_notify_uuid = Some(notification.uuid.to_string());
+                            s.last_payload_len = payload.len();
+                            s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
                         }
+                        log::warn!(
+                            "Receiving BLE notifications but cannot decrypt yet (received={}, decrypted=0). Check serial source.",
+                            received_packets
+                        );
                     }
-                    {
-                        let mut s = debug_stats.write().await;
-                        s.received_notifications = received_packets;
-                        s.decoded_packets = decrypted_packets;
-                        s.last_notify_uuid = Some(notification.uuid.to_string());
-                        s.last_payload_len = payload.len();
-                        s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
-                    }
-                    if tx.send(data).await.is_err() {
-                        break;
-                    }
-                } else if received_packets % 50 == 0 {
-                    {
-                        let mut s = debug_stats.write().await;
-                        s.received_notifications = received_packets;
-                        s.decoded_packets = decrypted_packets;
-                        s.decrypt_failures += 1;
-                        s.last_notify_uuid = Some(notification.uuid.to_string());
-                        s.last_payload_len = payload.len();
-                        s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
-                    }
-                    log::warn!(
-                        "Receiving BLE notifications but cannot decrypt yet (received={}, decrypted=0). Check serial source.",
-                        received_packets
-                    );
                 }
             }
             Ok(None) => break,
@@ -717,14 +746,18 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
 
 #[cfg(feature = "raw")]
 fn min_payload_len_for_model(model: HeadsetModel) -> usize {
+    expected_packet_len_for_model(model).min(20)
+}
+
+#[cfg(feature = "raw")]
+fn expected_packet_len_for_model(model: HeadsetModel) -> usize {
     match model {
-        HeadsetModel::Insight | HeadsetModel::Insight2 => 20,
+        HeadsetModel::Insight | HeadsetModel::Insight2 | HeadsetModel::MN8 | HeadsetModel::Xtrodes => 16,
         HeadsetModel::EpocX
         | HeadsetModel::EpocPlus
         | HeadsetModel::EpocStd
         | HeadsetModel::EpocFlex
-        | HeadsetModel::MN8
-        | HeadsetModel::Xtrodes => 20,
+            => 32,
     }
 }
 

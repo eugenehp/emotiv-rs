@@ -25,7 +25,7 @@ pub struct Decryptor {
 impl Decryptor {
     /// Create a new decryptor for a headset.
     pub fn new(model: HeadsetModel, serial: String) -> Result<Self> {
-        let aes_key = derive_aes_key_v1(&serial)?;
+        let aes_key = derive_aes_key_for_model(model, &serial)?;
 
         // Physical ranges per model
         let (physical_min, physical_max) = model.eeg_physical_range();
@@ -62,9 +62,9 @@ impl Decryptor {
         let packet_counter = u16::from_be_bytes([decrypted[0], decrypted[1]]) as u32;
         self.counter = packet_counter;
 
-        // Extract EEG data (14-bit samples packed into bytes)
+        // Extract EEG data (model-dependent sample packing)
         let eeg_channels = self.model.channel_count();
-        let eeg_adc = extract_14bit_samples(&decrypted[2..], eeg_channels);
+        let eeg_adc = extract_eeg_samples(self.model, &decrypted, eeg_channels);
         let min_channels = min_required_channels(self.model);
         if eeg_adc.len() < min_channels {
             return Err(anyhow!(
@@ -117,6 +117,18 @@ fn min_required_channels(model: HeadsetModel) -> usize {
     }
 }
 
+fn derive_aes_key_for_model(model: HeadsetModel, serial: &str) -> Result<Vec<u8>> {
+    match model {
+        HeadsetModel::EpocX => derive_aes_key_epoc_x_mode(serial),
+        HeadsetModel::EpocPlus | HeadsetModel::EpocFlex | HeadsetModel::Insight2 => {
+            derive_aes_key_v2(serial)
+        }
+        HeadsetModel::EpocStd | HeadsetModel::Insight | HeadsetModel::MN8 | HeadsetModel::Xtrodes => {
+            derive_aes_key_v1(serial)
+        }
+    }
+}
+
 /// Derive AES key from serial number (v1 algorithm, matches binary).
 fn derive_aes_key_v1(serial: &str) -> Result<Vec<u8>> {
     if serial.len() < 12 {
@@ -147,6 +159,66 @@ fn derive_aes_key_v1(serial: &str) -> Result<Vec<u8>> {
     key[14] = 0x10;
     key[15] = 0x42; // 'B'
 
+    Ok(key)
+}
+
+/// Derive AES key from serial number (v2 algorithm, matches benchmark parity).
+fn derive_aes_key_v2(serial: &str) -> Result<Vec<u8>> {
+    if serial.len() < 12 {
+        return Err(anyhow!(
+            "Serial number must be at least 12 chars, got: {}",
+            serial.len()
+        ));
+    }
+
+    let bytes = serial.as_bytes();
+    let mut key = vec![0u8; 16];
+    key[0] = bytes[0];
+    key[1] = bytes[3];
+    key[2] = bytes[7];
+    key[3] = bytes[1];
+    key[4] = bytes[5];
+    key[5] = bytes[11];
+    key[6] = bytes[4];
+    key[7] = bytes[9];
+    key[8] = bytes[2];
+    key[9] = bytes[6];
+    key[10] = bytes[10];
+    key[11] = bytes[8];
+    key[12] = 0x31; // '1'
+    key[13] = 0x31; // '1'
+    key[14] = 0x35; // '5'
+    key[15] = 0x39; // '9'
+    Ok(key)
+}
+
+/// Derive AES key from serial number (EPOC X mode variant).
+fn derive_aes_key_epoc_x_mode(serial: &str) -> Result<Vec<u8>> {
+    if serial.len() < 12 {
+        return Err(anyhow!(
+            "Serial number must be at least 12 chars, got: {}",
+            serial.len()
+        ));
+    }
+
+    let bytes = serial.as_bytes();
+    let mut key = vec![0u8; 16];
+    key[0] = bytes[0];
+    key[1] = bytes[1];
+    key[2] = bytes[2];
+    key[3] = bytes[3];
+    key[4] = bytes[4];
+    key[5] = bytes[5];
+    key[6] = bytes[6];
+    key[7] = bytes[7];
+    key[8] = bytes[8];
+    key[9] = bytes[9];
+    key[10] = bytes[10];
+    key[11] = bytes[11];
+    key[12] = 0x45; // 'E'
+    key[13] = 0x58; // 'X'
+    key[14] = 0x31; // '1'
+    key[15] = 0x30; // '0'
     Ok(key)
 }
 
@@ -196,6 +268,50 @@ fn extract_14bit_samples(data: &[u8], channel_count: usize) -> Vec<u16> {
     }
 
     samples
+}
+
+fn extract_16bit_be_samples(data: &[u8], channel_count: usize) -> Vec<u16> {
+    let mut samples = Vec::with_capacity(channel_count);
+    for idx in 0..channel_count {
+        let offset = idx * 2;
+        if offset + 1 >= data.len() {
+            break;
+        }
+        samples.push(u16::from_be_bytes([data[offset], data[offset + 1]]));
+    }
+    samples
+}
+
+fn extract_24bit_be_samples(data: &[u8], channel_count: usize) -> Vec<u16> {
+    let mut samples = Vec::with_capacity(channel_count);
+    for idx in 0..channel_count {
+        let offset = idx * 3;
+        if offset + 2 >= data.len() {
+            break;
+        }
+        let value = ((data[offset] as u32) << 16)
+            | ((data[offset + 1] as u32) << 8)
+            | (data[offset + 2] as u32);
+        samples.push(((value >> 8) & 0xFFFF) as u16);
+    }
+    samples
+}
+
+fn extract_eeg_samples(model: HeadsetModel, decrypted: &[u8], channel_count: usize) -> Vec<u16> {
+    if decrypted.len() <= 3 {
+        return Vec::new();
+    }
+
+    // Counter occupies first 2 bytes, battery is typically final byte.
+    let eeg_payload = &decrypted[2..decrypted.len() - 1];
+
+    match model {
+        HeadsetModel::EpocPlus | HeadsetModel::EpocX => {
+            extract_16bit_be_samples(eeg_payload, channel_count)
+        }
+        HeadsetModel::EpocFlex => extract_24bit_be_samples(eeg_payload, channel_count),
+        _ => extract_14bit_samples(eeg_payload, channel_count),
+    }
 }
 
 /// Extract per-channel contact quality.
@@ -248,6 +364,16 @@ mod tests {
         assert_eq!(key.len(), 16);
         assert_eq!(key[0], b'-');
         assert_eq!(key[13], 0x54); // 'T'
+        Ok(())
+    }
+
+    #[test]
+    fn test_key_derivation_v2() -> Result<()> {
+        let serial = "MOCKSN000001";
+        let key = derive_aes_key_v2(serial)?;
+        assert_eq!(key.len(), 16);
+        assert_eq!(key[12], b'1');
+        assert_eq!(key[15], b'9');
         Ok(())
     }
 
