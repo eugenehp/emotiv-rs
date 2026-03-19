@@ -893,18 +893,6 @@ async fn main() -> Result<()> {
                                                     let mut s = app_clone.lock().unwrap();
                                                     s.raw_last_decoded_channels = data.eeg_uv.len();
                                                     s.push_eeg(&data.eeg_uv);
-                                                    let incoming_battery = data.battery_percent as f64;
-                                                    s.battery = match s.battery {
-                                                        None => Some(incoming_battery),
-                                                        Some(prev) => {
-                                                            let diff = (incoming_battery - prev).abs();
-                                                            if diff <= 3.0 {
-                                                                Some(prev * 0.8 + incoming_battery * 0.2)
-                                                            } else {
-                                                                Some(prev)
-                                                            }
-                                                        }
-                                                    };
                                                     s.signal = Some(data.signal_quality as f64);
                                                 }
                                                 None => break,
