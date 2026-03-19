@@ -1,6 +1,6 @@
 [package]
 name          = "emotiv"
-version       = "0.0.7"
+version       = "0.0.8"
 edition       = "2021"
 rust-version  = "1.75"
 description   = "Async Rust client and TUI for Emotiv EEG headsets via the Cortex API WebSocket (JSON-RPC 2.0)"

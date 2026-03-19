@@ -754,6 +754,18 @@ async fn handle_result(
                     }
                 }
             }
+            // Log and emit errors for failed stream subscriptions.
+            if let Some(failure) = result.get("failure").and_then(|v| v.as_array()) {
+                for stream in failure {
+                    let name = stream.get("streamName").and_then(|v| v.as_str()).unwrap_or("");
+                    let code = stream.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let message = stream.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    warn!("Failed to subscribe to stream '{name}': code={code} {message}");
+                    let _ = event_tx.send(CortexEvent::Error(
+                        format!("Subscribe '{name}' failed: code={code} {message}")
+                    )).await;
+                }
+            }
         }
 
         UNSUB_REQUEST_ID => {
