@@ -193,15 +193,26 @@ async fn connect_and_stream(
     drop(device_state);
 
     let adapter = default_adapter().await?;
-    let peripheral = if let Some(p) = find_peripheral(&adapter, &info).await? {
-        p
-    } else {
-        adapter.start_scan(ScanFilter::default()).await.ok();
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        find_peripheral(&adapter, &info)
-            .await?
-            .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?
-    };
+    let mut peripheral = find_peripheral(&adapter, &info).await?;
+    if peripheral.is_none() {
+        let scan_attempts = [3_u64, 5_u64, 8_u64];
+        for wait_secs in scan_attempts {
+            adapter.start_scan(ScanFilter::default()).await.ok();
+            tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+            peripheral = find_peripheral(&adapter, &info).await?;
+            if peripheral.is_some() {
+                break;
+            }
+        }
+        adapter.stop_scan().await.ok();
+    }
+    let peripheral = peripheral.ok_or_else(|| {
+        anyhow!(
+            "BLE device not found after scan retries: {} ({})",
+            info.name,
+            info.address
+        )
+    })?;
 
     if !peripheral.is_connected().await.unwrap_or(false) {
         peripheral.connect().await?;

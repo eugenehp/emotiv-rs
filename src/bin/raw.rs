@@ -277,7 +277,11 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool, decode_audit: 
                     corr,
                 );
             }
-            Some(data) = rx.recv() => {
+            maybe_data = rx.recv() => {
+                let Some(data) = maybe_data else {
+                    break;
+                };
+
                 packet_count += 1;
 
                 if let Some(prev) = prev_counter {
