@@ -254,7 +254,6 @@ async fn connect_and_stream(
     let min_payload_len = min_payload_len_for_model(info.model);
     let required_channels = required_channels_for_model(info.model);
     let fallback_required_channels = fallback_required_channels_for_model(info.model);
-    let mut partial_mode = false;
     let mut partial_hits = vec![0u8; decryptors.len()];
     loop {
         if matches!(
@@ -282,11 +281,7 @@ async fn connect_and_stream(
                 let mut decoded = None;
                 if let Some(idx) = active_decryptor_idx {
                     if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&payload) {
-                        let ok_len = if partial_mode {
-                            data.eeg_uv.len() >= fallback_required_channels
-                        } else {
-                            data.eeg_uv.len() >= required_channels
-                        };
+                        let ok_len = data.eeg_uv.len() >= fallback_required_channels;
                         if ok_len {
                             decoded = Some(data);
                         }
@@ -304,22 +299,22 @@ async fn connect_and_stream(
                                 continue;
                             }
 
-                            if channels < required_channels {
+                            let is_partial = if channels < required_channels {
                                 partial_hits[idx] = partial_hits[idx].saturating_add(1);
                                 if partial_hits[idx] < 6 {
                                     continue;
                                 }
-                                partial_mode = true;
+                                true
                             } else {
-                                partial_mode = false;
-                            }
+                                false
+                            };
 
                             active_decryptor_idx = Some(idx);
                             log::info!(
                                 "Decryption synchronized with serial/model candidate: {}/{}{}",
                                 decryptors[idx].0,
                                 decryptors[idx].2.name(),
-                                if partial_mode { " (partial mode)" } else { "" }
+                                if is_partial { " (partial mode)" } else { "" }
                             );
                             {
                                 let mut s = debug_stats.write().await;
@@ -327,7 +322,7 @@ async fn connect_and_stream(
                                     "{}/{}{}",
                                     decryptors[idx].0,
                                     decryptors[idx].2.name(),
-                                    if partial_mode { ":partial" } else { "" }
+                                    if is_partial { ":partial" } else { "" }
                                 ));
                             }
                             decoded = Some(data);
@@ -338,9 +333,18 @@ async fn connect_and_stream(
 
                 if let Some(data) = decoded {
                     decrypted_packets += 1;
-                    if active_notify_uuid.is_none() {
+                    let is_full_decode = data.eeg_uv.len() >= required_channels;
+                    if active_notify_uuid.is_none() && is_full_decode {
                         active_notify_uuid = Some(notification.uuid);
                         log::info!("Locked active EEG notify UUID: {}", notification.uuid);
+                        if let Some(idx) = active_decryptor_idx {
+                            let mut s = debug_stats.write().await;
+                            s.active_serial_candidate = Some(format!(
+                                "{}/{}",
+                                decryptors[idx].0,
+                                decryptors[idx].2.name()
+                            ));
+                        }
                     }
                     {
                         let mut s = debug_stats.write().await;
