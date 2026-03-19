@@ -598,6 +598,15 @@ async fn handle_message(
                 let mut s = state.lock().await;
                 s.session_id.clear();
             }
+            HEADSET_DISCONNECTED | HEADSET_CONNECTION_FAILED => {
+                let headset_msg = message.as_str()
+                    .or_else(|| message.get("headsetId").and_then(|v| v.as_str()))
+                    .unwrap_or("unknown");
+                warn!("Headset event (code={code}): {headset_msg}");
+                // Emit Disconnected so consumers can react immediately
+                // instead of waiting for the data watchdog timeout.
+                let _ = event_tx.send(CortexEvent::Disconnected).await;
+            }
             CORTEX_RECORD_POST_PROCESSING_DONE => {
                 if let Some(record_id) = message.get("recordId").and_then(|v| v.as_str()) {
                     let _ = event_tx.send(CortexEvent::RecordPostProcessingDone(record_id.to_string())).await;
