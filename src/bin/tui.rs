@@ -6,6 +6,9 @@
 //! # Real headset (requires EMOTIV Launcher + API credentials)
 //! cargo run --bin emotiv-tui
 //!
+//! # Direct raw BLE mode (no Cortex API)
+//! cargo run --bin emotiv-tui --features raw -- --raw
+//!
 //! # Simulated signal (no hardware or credentials needed)
 //! cargo run --bin emotiv-tui --features simulate -- --simulate
 //! ```
@@ -71,6 +74,8 @@ use ratatui::{
 };
 
 use emotiv::types::*;
+#[cfg(feature = "raw")]
+use emotiv::raw;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -619,11 +624,24 @@ async fn main() -> Result<()> {
       if let Ok(f)=File::create(&p){env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).target(env_logger::Target::Pipe(Box::new(f))).init();log::info!("Logging to {}",p.display());}}
 
     let simulate = std::env::args().any(|a| a == "--simulate");
+    let raw_mode = std::env::args().any(|a| a == "--raw");
+
+    if simulate && raw_mode {
+        eprintln!("Error: --simulate and --raw cannot be used together.");
+        std::process::exit(1);
+    }
 
     #[cfg(not(feature = "simulate"))]
     if simulate {
         eprintln!("Error: --simulate requires the `simulate` feature.");
         eprintln!("  cargo run --bin emotiv-tui --features simulate -- --simulate");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(feature = "raw"))]
+    if raw_mode {
+        eprintln!("Error: --raw requires the `raw` feature.");
+        eprintln!("  cargo run --bin emotiv-tui --features raw -- --raw");
         std::process::exit(1);
     }
 
@@ -640,6 +658,55 @@ async fn main() -> Result<()> {
             spawn_interactive_simulator(Arc::clone(&app));
         }
         #[cfg(not(feature = "simulate"))]
+        unreachable!();
+    } else if raw_mode {
+        #[cfg(feature = "raw")]
+        {
+            let app_clone = Arc::clone(&app);
+            tokio::spawn(async move {
+                match raw::discover_devices().await {
+                    Ok(devices) if !devices.is_empty() => {
+                        let device = devices[0].clone();
+                        {
+                            let mut s = app_clone.lock().unwrap();
+                            s.channel_labels = device
+                                .model
+                                .channels()
+                                .into_iter()
+                                .map(|x| x.to_string())
+                                .collect();
+                        }
+
+                        match raw::RawDevice::from_info(device).connect().await {
+                            Ok((mut rx, _handle)) => {
+                                {
+                                    let mut s = app_clone.lock().unwrap();
+                                    s.connected = true;
+                                }
+                                while let Some(data) = rx.recv().await {
+                                    let mut s = app_clone.lock().unwrap();
+                                    s.push_eeg(&data.eeg_uv);
+                                    s.battery = Some(data.battery_percent as f64);
+                                    s.signal = Some(data.signal_quality as f64);
+                                }
+                                let mut s = app_clone.lock().unwrap();
+                                s.connected = false;
+                            }
+                            Err(err) => {
+                                log::error!("Raw BLE connection failed: {}", err);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        log::error!("No raw BLE devices found");
+                    }
+                    Err(err) => {
+                        log::error!("Raw BLE discovery failed: {}", err);
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "raw"))]
         unreachable!();
     } else {
         let app_clone = Arc::clone(&app);
