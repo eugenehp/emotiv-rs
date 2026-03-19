@@ -58,6 +58,8 @@ pub struct StreamDebugStats {
     pub last_notify_uuid: Option<String>,
     pub last_payload_len: usize,
     pub active_serial_candidate: Option<String>,
+    pub subscribed_characteristics: Vec<String>,
+    pub start_command_writes: u64,
 }
 
 /// Handle to a connected device for sending commands.
@@ -217,8 +219,21 @@ async fn connect_and_stream(
         }
     }
 
-    if let Err(err) = send_start_stream_command(&peripheral).await {
+    {
+        let mut s = debug_stats.write().await;
+        s.subscribed_characteristics = notify_chars.iter().map(|c| c.uuid.to_string()).collect();
+    }
+
+    let writes = match send_start_stream_command(&peripheral).await {
+        Ok(w) => w,
+        Err(err) => {
         log::warn!("Failed to send BLE start-stream command: {}", err);
+            0
+        }
+    };
+    {
+        let mut s = debug_stats.write().await;
+        s.start_command_writes = writes as u64;
     }
 
     let mut notifications = peripheral.notifications().await?;
@@ -471,23 +486,26 @@ async fn find_peripheral(
 }
 
 #[cfg(feature = "raw")]
-async fn send_start_stream_command(peripheral: &Peripheral) -> Result<()> {
+async fn send_start_stream_command(peripheral: &Peripheral) -> Result<usize> {
     const EMOTIV_CONTROL_SERVICE: &str = "00001101-d102-11e1-9b23-00025b00a5a5";
     let control_service_uuid = Uuid::parse_str(EMOTIV_CONTROL_SERVICE)?;
 
-    let maybe_char = peripheral
+    let control_chars: Vec<_> = peripheral
         .characteristics()
         .into_iter()
-        .find(|ch| {
+        .filter(|ch| {
             ch.service_uuid == control_service_uuid
                 && (ch.properties.contains(CharPropFlags::WRITE)
                     || ch
                         .properties
                         .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE))
-        });
+        })
+        .collect();
 
-    if let Some(ch) = maybe_char {
-        let payload = [0x01_u8, 0x00_u8];
+    let mut writes = 0usize;
+    let payloads: [&[u8]; 2] = [&[0x01_u8], &[0x01_u8, 0x00_u8]];
+
+    for ch in &control_chars {
         let write_type = if ch
             .properties
             .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
@@ -496,10 +514,14 @@ async fn send_start_stream_command(peripheral: &Peripheral) -> Result<()> {
         } else {
             WriteType::WithResponse
         };
-        peripheral.write(&ch, &payload, write_type).await?;
+        for payload in payloads {
+            if peripheral.write(ch, payload, write_type).await.is_ok() {
+                writes += 1;
+            }
+        }
     }
 
-    Ok(())
+    Ok(writes)
 }
 
 #[cfg(feature = "raw")]
@@ -512,7 +534,8 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
     let mut preferred: Vec<_> = all
         .iter()
         .filter(|ch| {
-            ch.properties.contains(CharPropFlags::NOTIFY)
+            (ch.properties.contains(CharPropFlags::NOTIFY)
+                || ch.properties.contains(CharPropFlags::INDICATE))
                 && data_uuid
                     .map(|svc| ch.service_uuid == svc)
                     .unwrap_or(false)
@@ -523,7 +546,10 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
     if preferred.is_empty() {
         preferred = all
             .into_iter()
-            .filter(|ch| ch.properties.contains(CharPropFlags::NOTIFY))
+            .filter(|ch| {
+                ch.properties.contains(CharPropFlags::NOTIFY)
+                    || ch.properties.contains(CharPropFlags::INDICATE)
+            })
             .collect();
     }
 
