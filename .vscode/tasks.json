@@ -1,0 +1,669 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "check-tui-raw",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "git-status-short",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"status",
+				"--short"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-raw-mode",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"feat(tui): add --raw mode for direct BLE streaming"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-raw-selection",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "git-status-short-raw-select",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"status",
+				"--short"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-raw-selection",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"feat(tui): add raw device selection flags"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-raw-selection",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-raw-parity",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-raw-parity",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(tui): match raw bin discovery and auto-pick behavior"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-tui-parity",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-raw-channels",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-channel-count-fix",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(tui): show full raw EEG channel set"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-tui-channel-count-fix",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-decode-fallback",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-raw-decode-robustness",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): add model fallback decryptors and relax payload gating"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-raw-decode-robustness",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "git-pull-main",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"pull"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "git-pull-gitea-local-main",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"pull",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-decode-integrity",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-decode-integrity-fix",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/decryption.rs",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): reject truncated EEG packets and restore payload guard"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-decode-integrity",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-stream-restore",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-stream-restore",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/decryption.rs",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): restore streaming with tolerant channel validation"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-stream-restore",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-raw-debug-overlay",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-raw-debug",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"feat(tui): add live raw decode debug telemetry"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-tui-raw-debug",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-timeout-recovery",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-raw-timeout-recovery",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): retry subscribe/start on BLE notification silence"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-timeout-recovery",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-correctness-battery",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-raw-full-channel-battery",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/device.rs",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): require full-channel lock and smooth battery display"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-full-channel-battery",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-partial-fallback",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-raw-dual-lock-mode",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): add staged full/partial decode lock strategy"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-dual-lock-mode",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-full-upgrade-lock",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-raw-lock-clean",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-raw-lock-upgrade",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/raw/device.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(raw): lock UUID only on full-channel decode"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-lock-upgrade",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-raw-battery-stable",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-raw-battery-na",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(tui): disable unstable raw packet battery display"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-battery-na",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-render-decoded-only",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-show-decoded-channels",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(tui): render only decoded raw channels when partial"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-decoded-only",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-show-na-channels",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-show-na-markers",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"fix(tui): show all channels and mark undecoded as N/A"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-na-markers",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-tui-zoom-range",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--bin",
+				"emotiv-tui",
+				"--features",
+				"raw"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "commit-tui-more-zoom",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"add",
+				"src/bin/tui.rs",
+				"&&",
+				"git",
+				"commit",
+				"-m",
+				"feat(tui): extend EEG zoom in/out scale range"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "push-local-main-more-zoom",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"push",
+				"local",
+				"main"
+			],
+			"isBackground": false
+		}
+	]
+}
