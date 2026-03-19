@@ -477,7 +477,6 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
     tokio::time::sleep(tokio::time::Duration::from_secs(scan_secs)).await;
 
     let mut matched_devices = Vec::new();
-    let mut fallback_devices = Vec::new();
     for peripheral in adapter.peripherals().await? {
         let Some(props) = peripheral.properties().await? else {
             continue;
@@ -489,6 +488,10 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
         } else {
             raw_name.clone()
         };
+        let lname = name.to_ascii_lowercase();
+        if lname.contains("mock") || lname.contains("virtual") || lname.contains("sim") {
+            continue;
+        }
         let ble_id = peripheral.id().to_string();
         let mac_raw = props.address.to_string();
         let ble_mac = if is_zero_mac(&mac_raw) { None } else { Some(mac_raw) };
@@ -500,11 +503,6 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
             &props.manufacturer_data,
             is_connected,
         );
-        let has_any_signal = !raw_name.trim().is_empty()
-            || !props.services.is_empty()
-            || is_connected
-            || ble_mac.is_some();
-
         let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocX);
         let serial = infer_serial(&name, ble_mac.as_deref().unwrap_or(&address));
         let info = DeviceInfo {
@@ -521,32 +519,15 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
 
         if emotiv_candidate {
             matched_devices.push(info);
-        } else {
-            if has_any_signal {
-                fallback_devices.push(info);
-            }
         }
     }
 
     adapter.stop_scan().await.ok();
     if matched_devices.is_empty() {
-        let allow_fallback = std::env::var("EMOTIV_RAW_ALLOW_FALLBACK")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if allow_fallback {
-            log::warn!(
-                "No explicit Emotiv BLE advertisements found; fallback enabled, returning all visible BLE peripherals ({})",
-                fallback_devices.len()
-            );
-            Ok(fallback_devices)
-        } else {
-            log::warn!(
-                "No explicit Emotiv BLE advertisements found; returning 0 devices (set EMOTIV_RAW_ALLOW_FALLBACK=1 to inspect all)",
-            );
-            Ok(Vec::new())
-        }
+        log::warn!(
+            "No explicit Emotiv BLE advertisements found; returning 0 devices.",
+        );
+        Ok(Vec::new())
     } else {
         Ok(matched_devices)
     }

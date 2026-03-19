@@ -9,7 +9,7 @@
 //! cargo run --bin emotiv-raw --features raw -- --list
 //!
 //! # Connect to a specific device
-//! cargo run --bin emotiv-raw --features raw -- --connect "MOCK-SN-000001"
+//! cargo run --bin emotiv-raw --features raw -- --connect "<BLE_ID_OR_SERIAL>"
 //!
 //! # Connect to first discovered device
 //! cargo run --bin emotiv-raw --features raw
@@ -99,7 +99,7 @@ async fn list_devices() -> Result<()> {
     }
     println!("└─────────────────────────────────────────────────────────────────────┘");
     println!("\nUsage:");
-    println!("  cargo run --bin emotiv-raw --features raw -- --connect \"MOCK-SN-000001\"");
+    println!("  cargo run --bin emotiv-raw --features raw -- --connect \"<BLE_ID_OR_SERIAL>\"");
 
     Ok(())
 }
