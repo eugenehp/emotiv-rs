@@ -162,9 +162,11 @@ fn is_zero_mac(mac: &str) -> bool {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const WINDOW_SECS: f64 = 2.0;
 const EEG_HZ: f64 = 128.0;
-const BUF_SIZE: usize = (WINDOW_SECS * EEG_HZ) as usize;
+const WINDOW_SECS_OPTIONS: &[f64] = &[2.0, 4.0, 6.0, 8.0, 10.0];
+const DEFAULT_WINDOW_IDX: usize = 0;
+const MAX_WINDOW_SECS: f64 = 10.0;
+const BUF_CAPACITY: usize = (MAX_WINDOW_SECS * EEG_HZ) as usize;
 const MAX_CHANNELS: usize = 14;
 const Y_SCALES: &[f64] = &[2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0];
 const DEFAULT_SCALE: usize = 5;
@@ -354,6 +356,7 @@ struct App {
     total_samples: u64,
     pkt_times: VecDeque<Instant>,
     scale_idx: usize,
+    window_idx: usize,
     paused: bool,
     smooth: bool,
     connected: bool,
@@ -379,7 +382,7 @@ struct RawDebugInfo {
 impl App {
     fn new(simulated: bool) -> Self {
         Self {
-            bufs: (0..MAX_CHANNELS).map(|_| VecDeque::with_capacity(BUF_SIZE+16)).collect(),
+            bufs: (0..MAX_CHANNELS).map(|_| VecDeque::with_capacity(BUF_CAPACITY + 16)).collect(),
             num_channels: if simulated{14}else{0},
             channel_labels: Vec::new(),
             view: ViewMode::Eeg,
@@ -390,6 +393,7 @@ impl App {
             total_samples: 0,
             pkt_times: VecDeque::with_capacity(256),
             scale_idx: if simulated{2}else{DEFAULT_SCALE},
+            window_idx: DEFAULT_WINDOW_IDX,
             paused: false, smooth: true,
             connected: false, simulated,
             #[cfg(feature = "raw")]
@@ -404,10 +408,11 @@ impl App {
     fn push_eeg(&mut self, samples: &[f64]) {
         if self.paused { return; }
         if self.num_channels == 0 { self.num_channels = samples.len().min(MAX_CHANNELS); }
+        let max_len = self.max_buf_len();
         for (ch, &v) in samples.iter().enumerate().take(MAX_CHANNELS) {
             let buf = &mut self.bufs[ch];
             buf.push_back(v);
-            while buf.len() > BUF_SIZE { buf.pop_front(); }
+            while buf.len() > max_len { buf.pop_front(); }
         }
         self.total_samples += 1;
         let now = Instant::now();
@@ -421,8 +426,30 @@ impl App {
         if s<1e-9{0.0}else{(n as f64-1.0)/s}
     }
     fn y_range(&self) -> f64 { Y_SCALES[self.scale_idx] }
+    fn window_secs(&self) -> f64 { WINDOW_SECS_OPTIONS[self.window_idx] }
+    fn max_buf_len(&self) -> usize { (self.window_secs() * EEG_HZ) as usize }
     fn scale_up(&mut self) { if self.scale_idx+1<Y_SCALES.len(){self.scale_idx+=1;} }
     fn scale_down(&mut self) { if self.scale_idx>0{self.scale_idx-=1;} }
+    fn window_up(&mut self) {
+        if self.window_idx + 1 < WINDOW_SECS_OPTIONS.len() {
+            self.window_idx += 1;
+            self.trim_buffers_to_window();
+        }
+    }
+    fn window_down(&mut self) {
+        if self.window_idx > 0 {
+            self.window_idx -= 1;
+            self.trim_buffers_to_window();
+        }
+    }
+    fn trim_buffers_to_window(&mut self) {
+        let max_len = self.max_buf_len();
+        for buf in &mut self.bufs {
+            while buf.len() > max_len {
+                buf.pop_front();
+            }
+        }
+    }
     fn auto_scale(&mut self) {
         let peak=self.bufs.iter().flat_map(|b|b.iter()).fold(0.0_f64,|a,&v|a.max(v.abs()));
         self.scale_idx=Y_SCALES.iter().position(|&s|s>=peak*1.1).unwrap_or(Y_SCALES.len()-1);
@@ -512,6 +539,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let bat=app.battery.map(|b|format!("Bat {b:.0}%")).unwrap_or("Bat N/A".into());
     let rate=format!("{:.1} pkt/s",app.pkt_rate());
     let scale=format!("±{:.0} µV",app.y_range());
+    let window = format!("{:.0}s", app.window_secs());
     let total=format!("{}K smp",app.total_samples/1_000);
     let mc=app.mc_action.as_deref().map(|a|{let p=app.mc_power.unwrap_or(0.0);format!("MC:{a}({p:.2})")}).unwrap_or_default();
     let fe=app.fe_action.as_deref().map(|a|{let p=app.fe_power.unwrap_or(0.0);format!("FE:{a}({p:.2})")}).unwrap_or_default();
@@ -550,6 +578,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         sep(), Span::styled(app.view.label(), Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
         sep(), Span::styled(bat, Style::default().fg(Color::White)),
         sep(), Span::styled(rate, Style::default().fg(Color::White)),
+        sep(), Span::styled(window, Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
         sep(), Span::styled(scale, Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
         sep(), Span::styled(total, Style::default().fg(Color::DarkGray)),
         sep(), Span::styled(mc, Style::default().fg(Color::LightGreen)),
@@ -571,6 +600,7 @@ fn draw_eeg_charts(frame: &mut Frame, area: Rect, app: &App) {
     let constraints:Vec<Constraint>=(0..n).map(|_|Constraint::Ratio(1,n as u32)).collect();
     let rows=Layout::vertical(constraints).split(area);
     let y_range=app.y_range();
+    let window_secs = app.window_secs();
     for ch in 0..n {
         let data:Vec<(f64,f64)>=app.bufs[ch].iter().enumerate().map(|(i,&v)|(i as f64/EEG_HZ,v.clamp(-y_range,y_range))).collect();
         let label=app.channel_labels.get(ch).cloned().unwrap_or_else(||{
@@ -607,7 +637,7 @@ fn draw_eeg_charts(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Chart::new(datasets)
             .block(Block::default().title(Span::styled(title,Style::default().fg(color).add_modifier(Modifier::BOLD)))
                 .borders(Borders::ALL).border_style(Style::default().fg(border_color)))
-            .x_axis(Axis::default().bounds([0.0,WINDOW_SECS]).labels(vec!["0s".into(),format!("{:.0}s",WINDOW_SECS)]).style(Style::default().fg(Color::DarkGray)))
+            .x_axis(Axis::default().bounds([0.0,window_secs]).labels(vec!["0s".into(),format!("{:.0}s",window_secs)]).style(Style::default().fg(Color::DarkGray)))
             .y_axis(Axis::default().bounds([-y_range,y_range]).labels(y_labels).style(Style::default().fg(Color::DarkGray))),
             rows[ch]);
     }
@@ -723,7 +753,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let mut kv:Vec<Span>=vec![Span::raw(" "), key_span("[Tab]"),Span::raw("View ")];
     #[cfg(feature = "simulate")]
     if app.simulated { kv.extend_from_slice(&[key_span("[1-5]"),Span::raw("State ")]); }
-    kv.extend_from_slice(&[key_span("[+/-]"),Span::raw("Scale "),key_span("[a]"),Span::raw("Auto "),
+    kv.extend_from_slice(&[key_span("[←/→]"),Span::raw("Time "),key_span("[+/-]"),Span::raw("Scale "),key_span("[a]"),Span::raw("Auto "),
         key_span("[v]"),Span::raw(if app.smooth{"Raw "}else{"Smth "}),key_span("[p]"),Span::raw("Pause "),key_span("[c]"),Span::raw("Clear ")]);
     #[cfg(feature = "simulate")]
     if app.simulated { kv.extend_from_slice(&[key_span("[b]"),Span::raw("Blnk "),key_span("[j]"),Span::raw("Jaw "),
@@ -984,6 +1014,8 @@ async fn main() -> Result<()> {
                     KeyCode::Tab => { s.view = s.view.next(is_sim); }
                     KeyCode::Char('+')|KeyCode::Char('=') => s.scale_up(),
                     KeyCode::Char('-') => s.scale_down(),
+                    KeyCode::Left | KeyCode::Char('[') => s.window_down(),
+                    KeyCode::Right | KeyCode::Char(']') => s.window_up(),
                     KeyCode::Char('a') => s.auto_scale(),
                     KeyCode::Char('v') => s.smooth = !s.smooth,
                     KeyCode::Char('p') => s.paused = true,
