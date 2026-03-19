@@ -60,6 +60,7 @@ pub struct StreamDebugStats {
     pub active_serial_candidate: Option<String>,
     pub subscribed_characteristics: Vec<String>,
     pub start_command_writes: u64,
+    pub active_notify_uuid: Option<String>,
 }
 
 /// Handle to a connected device for sending commands.
@@ -248,6 +249,8 @@ async fn connect_and_stream(
 
     let mut received_packets = 0u64;
     let mut decrypted_packets = 0u64;
+    let mut active_notify_uuid: Option<Uuid> = None;
+    let min_payload_len = min_payload_len_for_model(info.model);
     loop {
         if matches!(
             *state.read().await,
@@ -260,8 +263,14 @@ async fn connect_and_stream(
             Ok(Some(notification)) => {
                 received_packets += 1;
                 let payload = notification.value;
-                if payload.is_empty() {
+                if payload.is_empty() || payload.len() < min_payload_len {
                     continue;
+                }
+
+                if let Some(active_uuid) = active_notify_uuid {
+                    if notification.uuid != active_uuid {
+                        continue;
+                    }
                 }
 
                 let mut decoded = None;
@@ -294,12 +303,17 @@ async fn connect_and_stream(
 
                 if let Some(data) = decoded {
                     decrypted_packets += 1;
+                    if active_notify_uuid.is_none() {
+                        active_notify_uuid = Some(notification.uuid);
+                        log::info!("Locked active EEG notify UUID: {}", notification.uuid);
+                    }
                     {
                         let mut s = debug_stats.write().await;
                         s.received_notifications = received_packets;
                         s.decoded_packets = decrypted_packets;
                         s.last_notify_uuid = Some(notification.uuid.to_string());
                         s.last_payload_len = payload.len();
+                        s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
                     }
                     if tx.send(data).await.is_err() {
                         break;
@@ -312,6 +326,7 @@ async fn connect_and_stream(
                         s.decrypt_failures += 1;
                         s.last_notify_uuid = Some(notification.uuid.to_string());
                         s.last_payload_len = payload.len();
+                        s.active_notify_uuid = active_notify_uuid.map(|u| u.to_string());
                     }
                     log::warn!(
                         "Receiving BLE notifications but cannot decrypt yet (received={}, decrypted=0). Check serial source.",
@@ -625,10 +640,24 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
                 ch.properties.contains(CharPropFlags::NOTIFY)
                     || ch.properties.contains(CharPropFlags::INDICATE)
             })
+            .filter(|ch| ch.uuid != Uuid::from_u128(0x00002a19_0000_1000_8000_00805f9b34fb))
             .collect();
     }
 
     preferred
+}
+
+#[cfg(feature = "raw")]
+fn min_payload_len_for_model(model: HeadsetModel) -> usize {
+    match model {
+        HeadsetModel::Insight | HeadsetModel::Insight2 => 20,
+        HeadsetModel::EpocX
+        | HeadsetModel::EpocPlus
+        | HeadsetModel::EpocStd
+        | HeadsetModel::EpocFlex
+        | HeadsetModel::MN8
+        | HeadsetModel::Xtrodes => 28,
+    }
 }
 
 #[cfg(feature = "raw")]

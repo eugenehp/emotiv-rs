@@ -170,6 +170,7 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
     });
 
     let mut packet_count = 0u64;
+    let mut low_quality_warn_count = 0u64;
     let start_time = std::time::Instant::now();
 
     println!("┌────────────────────────────────────────────────────────────────────┐");
@@ -235,7 +236,10 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
                 }
 
                 // Check signal quality
-                if data.signal_quality < 2 {
+                let cq_unknown = !data.contact_quality.is_empty()
+                    && data.contact_quality.iter().all(|&v| v == 0);
+                if data.signal_quality < 2 && !cq_unknown && packet_count % 64 == 0 {
+                    low_quality_warn_count += 1;
                     eprintln!("⚠️  Low signal quality: {}", data.signal_quality);
                 }
             }
@@ -247,8 +251,8 @@ async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> 
     let elapsed = start_time.elapsed().as_secs_f64();
     let avg_rate = packet_count as f64 / elapsed;
     println!(
-        "│ Streamed {} packets in {:.1}s ({:.1} Hz avg)",
-        packet_count, elapsed, avg_rate
+        "│ Streamed {} packets in {:.1}s ({:.1} Hz avg) | low-signal warns {}",
+        packet_count, elapsed, avg_rate, low_quality_warn_count
     );
     println!("└────────────────────────────────────────────────────────────────────┘");
 
