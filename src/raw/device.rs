@@ -281,19 +281,24 @@ async fn connect_and_stream(
                 }
 
                 if decoded.is_none() {
-                    for (idx, (_, decryptor)) in decryptors.iter_mut().enumerate() {
+                    for (idx, (_, decryptor, _)) in decryptors.iter_mut().enumerate() {
                         if Some(idx) == active_decryptor_idx {
                             continue;
                         }
                         if let Ok(data) = decryptor.decrypt_eeg_packet(&payload) {
                             active_decryptor_idx = Some(idx);
                             log::info!(
-                                "Decryption synchronized with serial candidate: {}",
-                                decryptors[idx].0
+                                "Decryption synchronized with serial/model candidate: {}/{}",
+                                decryptors[idx].0,
+                                decryptors[idx].2.name()
                             );
                             {
                                 let mut s = debug_stats.write().await;
-                                s.active_serial_candidate = Some(decryptors[idx].0.clone());
+                                s.active_serial_candidate = Some(format!(
+                                    "{}/{}",
+                                    decryptors[idx].0,
+                                    decryptors[idx].2.name()
+                                ));
                             }
                             decoded = Some(data);
                             break;
@@ -656,7 +661,7 @@ fn min_payload_len_for_model(model: HeadsetModel) -> usize {
         | HeadsetModel::EpocStd
         | HeadsetModel::EpocFlex
         | HeadsetModel::MN8
-        | HeadsetModel::Xtrodes => 28,
+        | HeadsetModel::Xtrodes => 20,
     }
 }
 
@@ -807,11 +812,29 @@ fn serial_candidates(info: &DeviceInfo) -> Vec<String> {
 fn build_decryptors(
     model: HeadsetModel,
     serials: &[String],
-) -> Result<Vec<(String, Decryptor)>> {
+) -> Result<Vec<(String, Decryptor, HeadsetModel)>> {
+    let mut models = vec![model];
+    let fallback_models = [
+        HeadsetModel::EpocX,
+        HeadsetModel::EpocPlus,
+        HeadsetModel::EpocStd,
+        HeadsetModel::Insight,
+        HeadsetModel::Insight2,
+        HeadsetModel::MN8,
+        HeadsetModel::Xtrodes,
+    ];
+    for m in fallback_models {
+        if !models.contains(&m) {
+            models.push(m);
+        }
+    }
+
     let mut out = Vec::new();
     for serial in serials {
-        if let Ok(decryptor) = Decryptor::new(model, serial.clone()) {
-            out.push((serial.clone(), decryptor));
+        for m in &models {
+            if let Ok(decryptor) = Decryptor::new(*m, serial.clone()) {
+                out.push((serial.clone(), decryptor, *m));
+            }
         }
     }
     Ok(out)
