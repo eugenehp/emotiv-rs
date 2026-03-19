@@ -559,10 +559,26 @@ async fn handle_message(
 
         match code {
             ACCESS_RIGHT_GRANTED => {
-                responses.push(authorize(&config.client_id, &config.client_secret, &config.license, config.debit).to_string());
+                // Only authorize if we don't already have a token.
+                // Re-authorizing while a session is active would invalidate
+                // the current cortex token and kill the running session.
+                let already_authed = !state.lock().await.auth_token.is_empty();
+                if !already_authed {
+                    responses.push(authorize(&config.client_id, &config.client_secret, &config.license, config.debit).to_string());
+                } else {
+                    info!("ACCESS_RIGHT_GRANTED received but already authorized — skipping re-auth");
+                }
             }
             HEADSET_CONNECTED => {
-                responses.push(query_headsets().to_string());
+                // Only query headsets if we don't already have an active session.
+                // Re-querying would trigger create_session again, potentially
+                // disrupting the running stream.
+                let has_session = !state.lock().await.session_id.is_empty();
+                if !has_session {
+                    responses.push(query_headsets().to_string());
+                } else {
+                    info!("HEADSET_CONNECTED received but session already active — skipping query");
+                }
             }
             CORTEX_STOP_ALL_STREAMS => {
                 let mut s = state.lock().await;
@@ -574,7 +590,10 @@ async fn handle_message(
                 }
             }
             HEADSET_SCANNING_FINISHED => {
-                responses.push(refresh_headset_list().to_string());
+                let has_session = !state.lock().await.session_id.is_empty();
+                if !has_session {
+                    responses.push(refresh_headset_list().to_string());
+                }
             }
             _ => {}
         }
