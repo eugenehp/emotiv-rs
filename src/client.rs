@@ -397,7 +397,7 @@ async fn run_ws_loop(
                     Some(Ok(Message::Text(text))) => {
                         let text_str: &str = text.as_ref();
                         if config.debug_mode {
-                            debug!("WS recv: {text_str}");
+                            eprintln!("[emotiv-ws] recv: {text_str}");
                         }
                         match serde_json::from_str::<Value>(text_str) {
                             Ok(recv) => {
@@ -437,7 +437,7 @@ async fn run_ws_loop(
                 match cmd {
                     Some(msg) => {
                         if config.debug_mode {
-                            debug!("WS send: {msg}");
+                            eprintln!("[emotiv-ws] send: {msg}");
                         }
                         write.send(Message::Text(msg.into())).await?;
                     }
@@ -545,9 +545,12 @@ async fn handle_message(
     if let Some(error) = recv.get("error") {
         let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("unknown");
         let code = error.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
-        warn!("Cortex error (code={code}): {msg}");
+        let req_id = recv.get("id").and_then(|v| v.as_i64()).unwrap_or(-1);
+        eprintln!("[emotiv-ws] ERROR (req_id={req_id}, code={code}): {msg}");
         let cortex_err = crate::error::CortexError::from_api_error(code as i32, msg);
-        let _ = event_tx.send(CortexEvent::Error(cortex_err.to_string())).await;
+        let _ = event_tx.send(CortexEvent::Error(
+            format!("[req_id={req_id}] {cortex_err}")
+        )).await;
         return responses;
     }
 
@@ -615,6 +618,7 @@ async fn handle_result(
     match req_id {
         HAS_ACCESS_RIGHT_ID => {
             let granted = result.get("accessGranted").and_then(|v| v.as_bool()).unwrap_or(false);
+            info!("hasAccessRight: granted={granted}");
             if granted {
                 responses.push(authorize(&config.client_id, &config.client_secret, &config.license, config.debit).to_string());
             } else {

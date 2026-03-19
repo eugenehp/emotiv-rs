@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.4 — 2026-03-19
+
+### Bugfixes
+- **Request ID in error events**: Error events now include the JSON-RPC request ID that triggered the error, making it easier to diagnose which API call failed.
+- **Visible WS logging**: `debug_mode` now uses `eprintln!` instead of `log::debug!` so WS message traces are always captured in stderr (and log files), regardless of the log framework configuration.
+
 ## 0.0.3 — 2026-03-19
 
 ### Bugfixes
