@@ -92,6 +92,74 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
         .and_then(|idx| args.get(idx + 1).cloned())
 }
 
+#[cfg(feature = "raw")]
+fn select_best_device(devices: &[raw::DeviceInfo]) -> Option<&raw::DeviceInfo> {
+    let likely: Vec<&raw::DeviceInfo> = devices.iter().filter(|d| is_likely_emotiv(d)).collect();
+    if !likely.is_empty() {
+        likely.into_iter().max_by_key(|d| device_score(d))
+    } else {
+        devices.iter().max_by_key(|d| device_score(d))
+    }
+}
+
+#[cfg(feature = "raw")]
+fn device_score(d: &raw::DeviceInfo) -> i32 {
+    let mut score = 0;
+    let name = d.name.to_ascii_lowercase();
+    if name != "(unknown)" {
+        score += 20;
+    }
+    if name.contains("emotiv")
+        || name.contains("epoc")
+        || name.contains("insight")
+        || name.contains("flex")
+        || name.contains("mn8")
+        || name.contains("xtrodes")
+    {
+        score += 50;
+    }
+    if d.ble_mac.as_deref().is_some_and(|m| !is_zero_mac(m)) {
+        score += 15;
+    }
+    if !normalize_id(&d.ble_id).is_empty() {
+        score += 10;
+    }
+    if d.is_connected {
+        score += 10;
+    }
+    score
+}
+
+#[cfg(feature = "raw")]
+fn is_likely_emotiv(d: &raw::DeviceInfo) -> bool {
+    let name = d.name.to_ascii_lowercase();
+    if name.contains("emotiv")
+        || name.contains("epoc")
+        || name.contains("insight")
+        || name.contains("flex")
+        || name.contains("mn8")
+        || name.contains("xtrodes")
+    {
+        return true;
+    }
+
+    if name == "(unknown)" || name.starts_with("gb-") || name.starts_with("ble") {
+        return false;
+    }
+
+    d.is_connected
+}
+
+#[cfg(feature = "raw")]
+fn is_zero_mac(mac: &str) -> bool {
+    let only_hex: String = mac
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_lowercase();
+    !only_hex.is_empty() && only_hex.chars().all(|c| c == '0')
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const WINDOW_SECS: f64 = 2.0;
@@ -692,7 +760,13 @@ async fn main() -> Result<()> {
             let raw_index = raw_index;
             let raw_target = raw_target.clone();
             tokio::spawn(async move {
-                match raw::discover_devices().await {
+                let mut discovered = raw::discover_devices().await;
+                if matches!(discovered, Ok(ref d) if d.is_empty()) {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    discovered = raw::discover_devices().await;
+                }
+
+                match discovered {
                     Ok(devices) if !devices.is_empty() => {
                         let selected = if let Some(target) = raw_target {
                             let target_norm = normalize_id(&target);
@@ -711,8 +785,11 @@ async fn main() -> Result<()> {
                                         .unwrap_or(false)
                                     || normalize_id(&d.serial).contains(&target_norm)
                             })
+                        } else if let Some(index) = raw_index {
+                            Some(index)
                         } else {
-                            raw_index
+                            select_best_device(&devices)
+                                .and_then(|best| devices.iter().position(|d| d.ble_id == best.ble_id && d.address == best.address))
                         }
                         .unwrap_or(0);
 
