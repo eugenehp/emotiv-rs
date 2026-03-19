@@ -8,6 +8,8 @@
 //!
 //! # Direct raw BLE mode (no Cortex API)
 //! cargo run --bin emotiv-tui --features raw -- --raw
+//! cargo run --bin emotiv-tui --features raw -- --raw --raw-index 0
+//! cargo run --bin emotiv-tui --features raw -- --raw --raw-device EPOC_1234
 //!
 //! # Simulated signal (no hardware or credentials needed)
 //! cargo run --bin emotiv-tui --features simulate -- --simulate
@@ -76,6 +78,19 @@ use ratatui::{
 use emotiv::types::*;
 #[cfg(feature = "raw")]
 use emotiv::raw;
+
+fn normalize_id(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn arg_value(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|idx| args.get(idx + 1).cloned())
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -623,11 +638,22 @@ async fn main() -> Result<()> {
       let p=std::env::temp_dir().join("emotiv-tui.log");
       if let Ok(f)=File::create(&p){env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).target(env_logger::Target::Pipe(Box::new(f))).init();log::info!("Logging to {}",p.display());}}
 
-    let simulate = std::env::args().any(|a| a == "--simulate");
-    let raw_mode = std::env::args().any(|a| a == "--raw");
+    let args: Vec<String> = std::env::args().collect();
+    let simulate = args.iter().any(|a| a == "--simulate");
+    let raw_mode = args.iter().any(|a| a == "--raw");
+    let raw_index = arg_value(&args, "--raw-index").and_then(|v| v.parse::<usize>().ok());
+    let raw_target = arg_value(&args, "--raw-device")
+        .or_else(|| std::env::var("EMOTIV_RAW_DEVICE").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     if simulate && raw_mode {
         eprintln!("Error: --simulate and --raw cannot be used together.");
+        std::process::exit(1);
+    }
+
+    if !raw_mode && (raw_index.is_some() || raw_target.is_some()) {
+        eprintln!("Error: --raw-index/--raw-device require --raw.");
         std::process::exit(1);
     }
 
@@ -663,10 +689,51 @@ async fn main() -> Result<()> {
         #[cfg(feature = "raw")]
         {
             let app_clone = Arc::clone(&app);
+            let raw_index = raw_index;
+            let raw_target = raw_target.clone();
             tokio::spawn(async move {
                 match raw::discover_devices().await {
                     Ok(devices) if !devices.is_empty() => {
-                        let device = devices[0].clone();
+                        let selected = if let Some(target) = raw_target {
+                            let target_norm = normalize_id(&target);
+                            devices.iter().position(|d| {
+                                d.name.eq_ignore_ascii_case(&target)
+                                    || d.address.eq_ignore_ascii_case(&target)
+                                    || d.ble_id.eq_ignore_ascii_case(&target)
+                                    || d.ble_mac.as_deref().map(|m| m.eq_ignore_ascii_case(&target)).unwrap_or(false)
+                                    || d.serial.eq_ignore_ascii_case(&target)
+                                    || normalize_id(&d.name).contains(&target_norm)
+                                    || normalize_id(&d.address).contains(&target_norm)
+                                    || normalize_id(&d.ble_id).contains(&target_norm)
+                                    || d.ble_mac
+                                        .as_ref()
+                                        .map(|m| normalize_id(m).contains(&target_norm))
+                                        .unwrap_or(false)
+                                    || normalize_id(&d.serial).contains(&target_norm)
+                            })
+                        } else {
+                            raw_index
+                        }
+                        .unwrap_or(0);
+
+                        if selected >= devices.len() {
+                            log::error!(
+                                "Requested raw device index {} out of range (found {}).",
+                                selected,
+                                devices.len()
+                            );
+                            return;
+                        }
+
+                        let device = devices[selected].clone();
+                        log::info!(
+                            "Using raw device [{}]: {} | id={} | mac={} | serial={}",
+                            selected,
+                            device.name,
+                            device.ble_id,
+                            device.ble_mac.as_deref().unwrap_or("n/a"),
+                            device.serial
+                        );
                         {
                             let mut s = app_clone.lock().unwrap();
                             s.channel_labels = device
