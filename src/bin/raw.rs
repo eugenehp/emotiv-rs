@@ -85,6 +85,12 @@ async fn list_devices() -> Result<()> {
             device.model,
             device.transport
         );
+        println!("│     Name:     {}", device.name);
+        println!("│     BLE ID:   {}", device.ble_id);
+        println!(
+            "│     BLE MAC:  {}",
+            device.ble_mac.as_deref().unwrap_or("(unavailable)")
+        );
         println!("│     Address:  {}", device.address);
         println!("│     Serial:   {}", device.serial);
         println!("│     Battery:  {}%", device.battery_percent);
@@ -109,9 +115,11 @@ async fn connect_to_first_device() -> Result<()> {
 
     let device = &devices[0];
     info!(
-        "Connecting to {} ({}) - {}",
+        "Connecting to {} ({}) [{} / {}] - {}",
         device.model.name(),
         device.serial,
+        device.name,
+        device.ble_mac.as_deref().unwrap_or("no-mac"),
         device.transport
     );
 
@@ -128,9 +136,11 @@ async fn connect_to_device(address: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Device not found: {}", address))?;
 
     info!(
-        "Connecting to {} ({}) - {}",
+        "Connecting to {} ({}) [{} / {}] - {}",
         device.model.name(),
         device.serial,
+        device.name,
+        device.ble_mac.as_deref().unwrap_or("no-mac"),
         device.transport
     );
 

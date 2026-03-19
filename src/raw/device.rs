@@ -5,7 +5,7 @@ use crate::raw::types::{DecryptedData, HeadsetModel, DeviceState};
 use anyhow::{anyhow, Result};
 #[cfg(feature = "raw")]
 use btleplug::api::{
-    Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter,
+    Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
 #[cfg(feature = "raw")]
 use btleplug::platform::{Manager, Peripheral};
@@ -37,7 +37,10 @@ impl std::fmt::Display for TransportType {
 /// Information about a discovered device.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
+    pub name: String,
     pub address: String,
+    pub ble_id: String,
+    pub ble_mac: Option<String>,
     pub serial: String,
     pub model: HeadsetModel,
     pub transport: TransportType,
@@ -164,7 +167,7 @@ async fn connect_and_stream(
     let adapter = default_adapter().await?;
     adapter.start_scan(ScanFilter::default()).await.ok();
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    let peripheral = find_peripheral_by_address(&adapter, &info.address)
+    let peripheral = find_peripheral(&adapter, &info)
         .await?
         .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?;
 
@@ -173,7 +176,12 @@ async fn connect_and_stream(
     }
     peripheral.discover_services().await?;
 
-    let mut decryptor = Decryptor::new(info.model, normalize_serial_12(&info.serial))?;
+    let serial_candidates = serial_candidates(&info);
+    let mut decryptors = build_decryptors(info.model, &serial_candidates)?;
+    if decryptors.is_empty() {
+        return Err(anyhow!("No usable serial candidates for decryption"));
+    }
+    let mut active_decryptor_idx: Option<usize> = None;
 
     let notify_chars = select_notify_characteristics(&peripheral);
     if notify_chars.is_empty() {
@@ -186,12 +194,18 @@ async fn connect_and_stream(
         }
     }
 
+    if let Err(err) = send_start_stream_command(&peripheral).await {
+        log::warn!("Failed to send BLE start-stream command: {}", err);
+    }
+
     let mut notifications = peripheral.notifications().await?;
 
     let mut device_state = state.write().await;
     *device_state = DeviceState::Streaming;
     drop(device_state);
 
+    let mut received_packets = 0u64;
+    let mut decrypted_packets = 0u64;
     loop {
         if matches!(
             *state.read().await,
@@ -200,25 +214,58 @@ async fn connect_and_stream(
             break;
         }
 
-        match notifications.next().await {
-            Some(notification) => {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), notifications.next()).await {
+            Ok(Some(notification)) => {
+                received_packets += 1;
                 let payload = notification.value;
                 if payload.is_empty() {
                     continue;
                 }
 
-                match decryptor.decrypt_eeg_packet(&payload) {
-                    Ok(data) => {
-                        if tx.send(data).await.is_err() {
+                let mut decoded = None;
+                if let Some(idx) = active_decryptor_idx {
+                    if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&payload) {
+                        decoded = Some(data);
+                    }
+                }
+
+                if decoded.is_none() {
+                    for (idx, (_, decryptor)) in decryptors.iter_mut().enumerate() {
+                        if Some(idx) == active_decryptor_idx {
+                            continue;
+                        }
+                        if let Ok(data) = decryptor.decrypt_eeg_packet(&payload) {
+                            active_decryptor_idx = Some(idx);
+                            log::info!(
+                                "Decryption synchronized with serial candidate: {}",
+                                decryptors[idx].0
+                            );
+                            decoded = Some(data);
                             break;
                         }
                     }
-                    Err(err) => {
-                        log::debug!("Failed to decrypt packet: {}", err);
+                }
+
+                if let Some(data) = decoded {
+                    decrypted_packets += 1;
+                    if tx.send(data).await.is_err() {
+                        break;
                     }
+                } else if received_packets % 50 == 0 {
+                    log::warn!(
+                        "Receiving BLE notifications but cannot decrypt yet (received={}, decrypted=0). Check serial source.",
+                        received_packets
+                    );
                 }
             }
-            None => break,
+            Ok(None) => break,
+            Err(_) => {
+                log::warn!(
+                    "No BLE notifications for 5s (received={}, decrypted={})",
+                    received_packets,
+                    decrypted_packets
+                );
+            }
         }
     }
 
@@ -250,14 +297,21 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
             continue;
         };
 
-        let name = props.local_name.unwrap_or_default();
-        let address = peripheral.id().to_string();
+        let name = props.local_name.unwrap_or_else(|| "(unknown)".to_string());
+        let ble_id = peripheral.id().to_string();
+        let ble_mac = Some(props.address.to_string());
+        let address = ble_id.clone();
         let is_connected = peripheral.is_connected().await.unwrap_or(false);
+        let emotiv_candidate = is_emotiv_candidate(&name, &props.services, is_connected);
+        let has_any_signal = !name.is_empty() || !props.services.is_empty() || is_connected;
 
         let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocX);
-        let serial = infer_serial(&name, &address);
+        let serial = infer_serial(&name, ble_mac.as_deref().unwrap_or(&address));
         let info = DeviceInfo {
+            name,
             address,
+            ble_id,
+            ble_mac,
             serial,
             model,
             transport: TransportType::Ble,
@@ -265,10 +319,9 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
             is_connected,
         };
 
-        if is_emotiv_candidate(&name, &props.services, is_connected) {
+        if emotiv_candidate {
             matched_devices.push(info);
         } else {
-            let has_any_signal = !name.is_empty() || !props.services.is_empty() || is_connected;
             if has_any_signal {
                 fallback_devices.push(info);
             }
@@ -316,16 +369,74 @@ async fn default_adapter() -> Result<btleplug::platform::Adapter> {
 }
 
 #[cfg(feature = "raw")]
-async fn find_peripheral_by_address(
+async fn find_peripheral(
     adapter: &btleplug::platform::Adapter,
-    address: &str,
+    info: &DeviceInfo,
 ) -> Result<Option<Peripheral>> {
+    let target_id = normalize_id(&info.address);
+    let target_ble_id = normalize_id(&info.ble_id);
+    let target_mac = info
+        .ble_mac
+        .as_deref()
+        .map(normalize_id)
+        .unwrap_or_default();
+    let target_name = normalize_id(&info.name);
+
     for p in adapter.peripherals().await? {
-        if p.id().to_string() == address {
+        let pid = p.id().to_string();
+        let pid_norm = normalize_id(&pid);
+        let props = p.properties().await.ok().flatten();
+        let mac_norm = props
+            .as_ref()
+            .map(|x| normalize_id(&x.address.to_string()))
+            .unwrap_or_default();
+        let name_norm = props
+            .as_ref()
+            .and_then(|x| x.local_name.as_ref())
+            .map(|n| normalize_id(n))
+            .unwrap_or_default();
+
+        if (!target_id.is_empty() && pid_norm == target_id)
+            || (!target_ble_id.is_empty() && pid_norm == target_ble_id)
+            || (!target_mac.is_empty() && !mac_norm.is_empty() && target_mac == mac_norm)
+            || (!target_name.is_empty() && !name_norm.is_empty() && target_name == name_norm)
+        {
             return Ok(Some(p));
         }
     }
     Ok(None)
+}
+
+#[cfg(feature = "raw")]
+async fn send_start_stream_command(peripheral: &Peripheral) -> Result<()> {
+    const EMOTIV_CONTROL_SERVICE: &str = "00001101-d102-11e1-9b23-00025b00a5a5";
+    let control_service_uuid = Uuid::parse_str(EMOTIV_CONTROL_SERVICE)?;
+
+    let maybe_char = peripheral
+        .characteristics()
+        .into_iter()
+        .find(|ch| {
+            ch.service_uuid == control_service_uuid
+                && (ch.properties.contains(CharPropFlags::WRITE)
+                    || ch
+                        .properties
+                        .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE))
+        });
+
+    if let Some(ch) = maybe_char {
+        let payload = [0x01_u8, 0x00_u8];
+        let write_type = if ch
+            .properties
+            .contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
+        {
+            WriteType::WithoutResponse
+        } else {
+            WriteType::WithResponse
+        };
+        peripheral.write(&ch, &payload, write_type).await?;
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "raw")]
@@ -441,6 +552,49 @@ fn normalize_serial_12(input: &str) -> String {
         chars.push('0');
     }
     chars
+}
+
+#[cfg(feature = "raw")]
+fn normalize_id(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+#[cfg(feature = "raw")]
+fn serial_candidates(info: &DeviceInfo) -> Vec<String> {
+    let mut out = Vec::new();
+
+    let mut push_unique = |s: String| {
+        if !s.is_empty() && !out.iter().any(|x| x == &s) {
+            out.push(s);
+        }
+    };
+
+    push_unique(normalize_serial_12(&info.serial));
+    push_unique(normalize_serial_12(&info.address));
+    push_unique(normalize_serial_12(&info.ble_id));
+    if let Some(mac) = &info.ble_mac {
+        push_unique(normalize_serial_12(mac));
+    }
+    push_unique(normalize_serial_12(&info.name));
+
+    out
+}
+
+#[cfg(feature = "raw")]
+fn build_decryptors(
+    model: HeadsetModel,
+    serials: &[String],
+) -> Result<Vec<(String, Decryptor)>> {
+    let mut out = Vec::new();
+    for serial in serials {
+        if let Ok(decryptor) = Decryptor::new(model, serial.clone()) {
+            out.push((serial.clone(), decryptor));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
