@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.3 — 2026-03-19
+
+### Bugfixes
+- **Prevent re-auth warnings from killing active sessions**: The Cortex service can send `ACCESS_RIGHT_GRANTED` (code 9), `HEADSET_CONNECTED` (code 104), and `HEADSET_SCANNING_FINISHED` (code 142) warnings at any time — including while a session is active. Previously each handler unconditionally triggered `authorize()`, `query_headsets()`, or `refresh_headset_list()`, which could invalidate the current cortex token or create a duplicate session. Now each handler checks the current state first and skips the action if a token or session is already established.
+
 ## 0.0.1 — 2026-03-17
 
 Initial release.
