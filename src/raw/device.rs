@@ -162,6 +162,8 @@ async fn connect_and_stream(
     drop(device_state);
 
     let adapter = default_adapter().await?;
+    adapter.start_scan(ScanFilter::default()).await.ok();
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let peripheral = find_peripheral_by_address(&adapter, &info.address)
         .await?
         .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?;
@@ -234,35 +236,55 @@ async fn connect_and_stream(
 async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
     let adapter = default_adapter().await?;
     adapter.start_scan(ScanFilter::default()).await?;
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let scan_secs = std::env::var("EMOTIV_RAW_SCAN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(8)
+        .max(3);
+    tokio::time::sleep(tokio::time::Duration::from_secs(scan_secs)).await;
 
-    let mut devices = Vec::new();
+    let mut matched_devices = Vec::new();
+    let mut fallback_devices = Vec::new();
     for peripheral in adapter.peripherals().await? {
         let Some(props) = peripheral.properties().await? else {
             continue;
         };
 
         let name = props.local_name.unwrap_or_default();
-        if !is_emotiv_candidate(&name, &props.services) {
-            continue;
-        }
+        let address = peripheral.id().to_string();
+        let is_connected = peripheral.is_connected().await.unwrap_or(false);
 
         let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocX);
-        let address = peripheral.id().to_string();
         let serial = infer_serial(&name, &address);
-
-        devices.push(DeviceInfo {
+        let info = DeviceInfo {
             address,
             serial,
             model,
             transport: TransportType::Ble,
             battery_percent: 0,
-            is_connected: peripheral.is_connected().await.unwrap_or(false),
-        });
+            is_connected,
+        };
+
+        if is_emotiv_candidate(&name, &props.services, is_connected) {
+            matched_devices.push(info);
+        } else {
+            let has_any_signal = !name.is_empty() || !props.services.is_empty() || is_connected;
+            if has_any_signal {
+                fallback_devices.push(info);
+            }
+        }
     }
 
     adapter.stop_scan().await.ok();
-    Ok(devices)
+    if matched_devices.is_empty() {
+        log::warn!(
+            "No explicit Emotiv BLE advertisements found; returning all visible BLE peripherals ({})",
+            fallback_devices.len()
+        );
+        Ok(fallback_devices)
+    } else {
+        Ok(matched_devices)
+    }
 }
 
 #[cfg(not(feature = "raw"))]
@@ -335,7 +357,7 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
 }
 
 #[cfg(feature = "raw")]
-fn is_emotiv_candidate(name: &str, services: &[Uuid]) -> bool {
+fn is_emotiv_candidate(name: &str, services: &[Uuid], is_connected: bool) -> bool {
     let lname = name.to_ascii_lowercase();
     if lname.contains("emotiv")
         || lname.contains("epoc")
@@ -344,6 +366,10 @@ fn is_emotiv_candidate(name: &str, services: &[Uuid]) -> bool {
         || lname.contains("mn8")
         || lname.contains("xtrodes")
     {
+        return true;
+    }
+
+    if is_connected {
         return true;
     }
 
