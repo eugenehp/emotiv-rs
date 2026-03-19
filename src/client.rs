@@ -866,10 +866,18 @@ async fn handle_stream_data(recv: &Value, event_tx: &mpsc::Sender<CortexEvent>) 
     let time = recv.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     if let Some(eeg) = recv.get("eeg").and_then(|v| v.as_array()) {
-        let samples: Vec<f64> = eeg.iter().filter_map(|v| v.as_f64()).collect();
+        // Use NaN for non-numeric values (e.g. marker strings "0:0:0") to
+        // preserve array positions.  Consumers use DataLabels to know which
+        // indices are electrodes — filter_map would shift indices and break
+        // the electrode mapping.
+        let samples: Vec<f64> = eeg.iter()
+            .map(|v| v.as_f64().unwrap_or(f64::NAN))
+            .collect();
         let _ = event_tx.send(CortexEvent::Eeg(EegData { samples, time })).await;
     } else if let Some(mot) = recv.get("mot").and_then(|v| v.as_array()) {
-        let samples: Vec<f64> = mot.iter().filter_map(|v| v.as_f64()).collect();
+        let samples: Vec<f64> = mot.iter()
+            .map(|v| v.as_f64().unwrap_or(f64::NAN))
+            .collect();
         let _ = event_tx.send(CortexEvent::Motion(MotionData { samples, time })).await;
     } else if let Some(dev) = recv.get("dev").and_then(|v| v.as_array()) {
         let signal = dev.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);

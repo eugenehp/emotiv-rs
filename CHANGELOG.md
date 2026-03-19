@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.5 — 2026-03-19
+
+### Bugfixes
+- **Preserve EEG array positions for non-numeric values**: The Cortex API includes string values in the EEG array (e.g. marker data `"0:0:0"`). Previously `filter_map(as_f64)` dropped these, shifting all subsequent array indices and breaking the DataLabels-to-electrode mapping. Now uses `map(unwrap_or(NAN))` to preserve positions, so electrode indices from DataLabels always point to the correct data.
+
 ## 0.0.4 — 2026-03-19
 
 ### Bugfixes
