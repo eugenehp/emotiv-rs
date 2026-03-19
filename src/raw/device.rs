@@ -661,7 +661,7 @@ fn min_payload_len_for_model(model: HeadsetModel) -> usize {
         | HeadsetModel::EpocStd
         | HeadsetModel::EpocFlex
         | HeadsetModel::MN8
-        | HeadsetModel::Xtrodes => 28,
+        | HeadsetModel::Xtrodes => 20,
     }
 }
 

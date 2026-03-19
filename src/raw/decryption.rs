@@ -65,7 +65,8 @@ impl Decryptor {
         // Extract EEG data (14-bit samples packed into bytes)
         let eeg_channels = self.model.channel_count();
         let eeg_adc = extract_14bit_samples(&decrypted[2..], eeg_channels);
-        if eeg_adc.len() != eeg_channels {
+        let min_channels = min_required_channels(self.model);
+        if eeg_adc.len() < min_channels {
             return Err(anyhow!(
                 "Incomplete EEG payload for {}: got {} of {} channels",
                 self.model.name(),
@@ -102,6 +103,17 @@ impl Decryptor {
                 self.physical_min + (normalized * (self.physical_max - self.physical_min))
             })
             .collect()
+    }
+}
+
+fn min_required_channels(model: HeadsetModel) -> usize {
+    match model {
+        HeadsetModel::Insight | HeadsetModel::Insight2 => 5,
+        HeadsetModel::MN8 | HeadsetModel::Xtrodes => 8,
+        HeadsetModel::EpocX
+        | HeadsetModel::EpocPlus
+        | HeadsetModel::EpocStd
+        | HeadsetModel::EpocFlex => 10,
     }
 }
 
