@@ -91,6 +91,8 @@ pub mod retry;
 #[cfg(feature = "simulate")]
 pub mod simulator;
 pub mod types;
+#[cfg(feature = "raw")]
+pub mod raw;
 
 /// Convenience re-exports for downstream crates.
 ///
