@@ -563,7 +563,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 #[inline] fn key_span(s:&str)->Span<'_>{Span::styled(s,Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))}
 
 fn draw_eeg_charts(frame: &mut Frame, area: Rect, app: &App) {
-    let n=app.num_channels.max(1).min(MAX_CHANNELS);
+    let n=app
+        .num_channels
+        .max(app.channel_labels.len())
+        .max(1)
+        .min(MAX_CHANNELS);
     let constraints:Vec<Constraint>=(0..n).map(|_|Constraint::Ratio(1,n as u32)).collect();
     let rows=Layout::vertical(constraints).split(area);
     let y_range=app.y_range();
@@ -587,10 +591,16 @@ fn draw_eeg_charts(frame: &mut Frame, area: Rect, app: &App) {
             let max=buf.iter().copied().fold(f64::NEG_INFINITY,f64::max);
             (min,max,(buf.iter().map(|&v|v*v).sum::<f64>()/buf.len() as f64).sqrt())
         };
-        let clipping=max_v>y_range||min_v< -y_range;
+        #[cfg(feature = "raw")]
+        let channel_na = !app.simulated && ch >= app.raw_last_decoded_channels && app.raw_last_decoded_channels > 0;
+        #[cfg(not(feature = "raw"))]
+        let channel_na = false;
+
+        let clipping=(max_v>y_range||min_v< -y_range) && !channel_na;
         let clip_tag=if clipping{" [CLIP]"}else{""};
         let smooth_tag=if app.smooth{" [S]"}else{""};
-        let title=format!(" {label}  {min_v:+.0}/{max_v:+.0} rms:{rms_v:.0}{clip_tag}{smooth_tag} ");
+        let na_tag=if channel_na{" [N/A]"}else{""};
+        let title=format!(" {label}  {min_v:+.0}/{max_v:+.0} rms:{rms_v:.0}{na_tag}{clip_tag}{smooth_tag} ");
         let border_color=if clipping{Color::Red}else{color};
         let y_labels:Vec<String>=[-1.0,0.0,1.0].iter().map(|&f|format!("{:+.0}",f*y_range)).collect();
 
@@ -890,12 +900,10 @@ async fn main() -> Result<()> {
                                                     let decoded_channels = data.eeg_uv.len().min(MAX_CHANNELS);
                                                     s.raw_last_decoded_channels = decoded_channels;
                                                     let labeled_channels = s.channel_labels.len().min(MAX_CHANNELS);
-                                                    if decoded_channels > 0 && labeled_channels > 0 {
-                                                        if decoded_channels < labeled_channels {
-                                                            s.num_channels = decoded_channels;
-                                                        } else if decoded_channels > s.num_channels {
-                                                            s.num_channels = decoded_channels;
-                                                        }
+                                                    if labeled_channels > 0 {
+                                                        s.num_channels = labeled_channels;
+                                                    } else if decoded_channels > s.num_channels {
+                                                        s.num_channels = decoded_channels;
                                                     }
                                                     s.push_eeg(&data.eeg_uv);
                                                     s.signal = Some(data.signal_quality as f64);
