@@ -156,47 +156,23 @@ fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
 /// Extract 14-bit EEG samples from packed bytes.
 fn extract_14bit_samples(data: &[u8], channel_count: usize) -> Vec<u16> {
     let mut samples = Vec::with_capacity(channel_count);
-    let mut bit_offset = 0;
-
-    for _ in 0..channel_count {
-        let byte_offset = bit_offset / 8;
-        let bit_in_byte = bit_offset % 8;
-
-        if byte_offset + 1 >= data.len() {
+    let total_bits = data.len() * 8;
+    for sample_idx in 0..channel_count {
+        let start_bit = sample_idx * 14;
+        if start_bit + 14 > total_bits {
             break;
         }
 
-        let value: u16 = if bit_in_byte + 14 <= 8 {
-            // Fits in one byte (unlikely)
-            ((data[byte_offset] >> (8 - bit_in_byte - 14)) & 0x3F) as u16
-        } else if bit_in_byte + 14 <= 16 {
-            // Spans two bytes
-            let bits_in_first = 8 - bit_in_byte;
-            let bits_in_second = 14 - bits_in_first;
-            let mut v = ((data[byte_offset] & ((1 << bits_in_first) - 1)) as u16) << bits_in_second;
-            if byte_offset + 1 < data.len() {
-                v |= (data[byte_offset + 1] >> (8 - bits_in_second)) as u16;
-            }
-            v
-        } else {
-            // Spans three bytes
-            let bits_in_first = 8 - bit_in_byte;
-            let bits_in_second = 8;
-            let bits_in_third = 14 - bits_in_first - bits_in_second;
+        let mut value: u16 = 0;
+        for bit in 0..14 {
+            let bit_pos = start_bit + bit;
+            let byte_idx = bit_pos / 8;
+            let bit_idx_in_byte = 7 - (bit_pos % 8);
+            let bit_val = (data[byte_idx] >> bit_idx_in_byte) & 0x01;
+            value = (value << 1) | (bit_val as u16);
+        }
 
-            let mut v = ((data[byte_offset] & ((1 << bits_in_first) - 1)) as u16) << (8 + bits_in_third);
-            if byte_offset + 1 < data.len() {
-                v |= (data[byte_offset + 1] as u16) << bits_in_third;
-            }
-            if byte_offset + 2 < data.len() {
-                v |= (data[byte_offset + 2] >> (8 - bits_in_third)) as u16;
-            }
-            v
-        };
-
-        // Normalize to 14-bit range
-        samples.push((value & 0x3FFF) as u16);
-        bit_offset += 14;
+        samples.push(value & 0x3FFF);
     }
 
     samples
