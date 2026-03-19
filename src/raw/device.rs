@@ -252,6 +252,7 @@ async fn connect_and_stream(
     let mut decrypted_packets = 0u64;
     let mut active_notify_uuid: Option<Uuid> = None;
     let min_payload_len = min_payload_len_for_model(info.model);
+    let required_channels = required_channels_for_model(info.model);
     loop {
         if matches!(
             *state.read().await,
@@ -278,7 +279,9 @@ async fn connect_and_stream(
                 let mut decoded = None;
                 if let Some(idx) = active_decryptor_idx {
                     if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&payload) {
-                        decoded = Some(data);
+                        if data.eeg_uv.len() >= required_channels {
+                            decoded = Some(data);
+                        }
                     }
                 }
 
@@ -288,6 +291,9 @@ async fn connect_and_stream(
                             continue;
                         }
                         if let Ok(data) = decryptor.decrypt_eeg_packet(&payload) {
+                            if data.eeg_uv.len() < required_channels {
+                                continue;
+                            }
                             active_decryptor_idx = Some(idx);
                             log::info!(
                                 "Decryption synchronized with serial/model candidate: {}/{}",
@@ -383,6 +389,11 @@ async fn connect_and_stream(
 
     Ok(())
     }
+}
+
+#[cfg(feature = "raw")]
+fn required_channels_for_model(model: HeadsetModel) -> usize {
+    model.channel_count()
 }
 
 /// Discover BLE devices (returns empty if feature disabled).
