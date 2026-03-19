@@ -65,6 +65,14 @@ impl Decryptor {
         // Extract EEG data (14-bit samples packed into bytes)
         let eeg_channels = self.model.channel_count();
         let eeg_adc = extract_14bit_samples(&decrypted[2..], eeg_channels);
+        if eeg_adc.len() != eeg_channels {
+            return Err(anyhow!(
+                "Incomplete EEG payload for {}: got {} of {} channels",
+                self.model.name(),
+                eeg_adc.len(),
+                eeg_channels
+            ));
+        }
         let eeg_uv = self.adc_to_uv(&eeg_adc);
 
         // Extract contact quality (CQ in high bits)
