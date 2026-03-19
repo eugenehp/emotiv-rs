@@ -670,6 +670,13 @@ async fn handle_result(
                     .collect();
                 let _ = event_tx.send(CortexEvent::HeadsetsQueried(infos)).await;
 
+                // When auto_create_session is disabled, stop here — the
+                // caller only wants the headset list, not the side effects
+                // of connecting to a headset and creating a session.
+                if !config.auto_create_session {
+                    return responses;
+                }
+
                 let mut s = state.lock().await;
 
                 if headsets.is_empty() {
@@ -1578,5 +1585,40 @@ mod tests {
 
         // No connect/create responses when no headsets
         assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_headset_query_no_auto_connect() {
+        // When auto_create_session is false, queryHeadsets should only emit
+        // HeadsetsQueried and NOT produce connect_headset / create_session.
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = CortexClientConfig {
+            client_id: "test".into(),
+            client_secret: "test".into(),
+            auto_create_session: false,
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(ClientState {
+            auth_token: "tok".into(),
+            session_id: String::new(),
+            headset_id: String::new(),
+        }));
+        let result = serde_json::json!([
+            {"id": "EPOCX-AAA", "status": "connected", "connectedBy": "dongle"},
+            {"id": "INSIGHT-BBB", "status": "discovered", "connectedBy": ""}
+        ]);
+        let responses = handle_result(QUERY_HEADSET_ID, &result, &config, &state, &tx).await;
+
+        // Should emit HeadsetsQueried with both headsets
+        if let Some(CortexEvent::HeadsetsQueried(headsets)) = rx.recv().await {
+            assert_eq!(headsets.len(), 2);
+        } else {
+            panic!("Expected HeadsetsQueried event");
+        }
+
+        // No connect/create_session responses — enumeration only
+        assert!(responses.is_empty(), "expected no side-effect responses, got {responses:?}");
+        // headset_id should NOT be set
+        assert!(state.lock().await.headset_id.is_empty());
     }
 }
