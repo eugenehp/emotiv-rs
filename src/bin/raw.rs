@@ -115,7 +115,7 @@ async fn connect_to_first_device() -> Result<()> {
         device.transport
     );
 
-    stream_device(device.address.as_str()).await?;
+    stream_device(device.clone()).await?;
     Ok(())
 }
 
@@ -124,7 +124,7 @@ async fn connect_to_device(address: &str) -> Result<()> {
     let devices = raw::discover_devices().await?;
     let device = devices
         .iter()
-        .find(|d| d.address == address || d.serial.contains(address))
+        .find(|d| id_match(&d.address, address) || id_match(&d.serial, address))
         .ok_or_else(|| anyhow::anyhow!("Device not found: {}", address))?;
 
     info!(
@@ -134,13 +134,13 @@ async fn connect_to_device(address: &str) -> Result<()> {
         device.transport
     );
 
-    stream_device(&device.address).await?;
+    stream_device(device.clone()).await?;
     Ok(())
 }
 
 #[cfg(feature = "raw")]
-async fn stream_device(address: &str) -> Result<()> {
-    let (mut rx, _handle) = raw::connect_device(address).await?;
+async fn stream_device(device: raw::DeviceInfo) -> Result<()> {
+    let (mut rx, _handle) = raw::RawDevice::from_info(device).connect().await?;
 
     info!("✅ Connected! Streaming EEG data...");
     info!("Press Ctrl-C to stop.\n");
@@ -214,4 +214,22 @@ async fn stream_device(address: &str) -> Result<()> {
     println!("└────────────────────────────────────────────────────────────────────┘");
 
     Ok(())
+}
+
+#[cfg(feature = "raw")]
+fn id_match(candidate: &str, input: &str) -> bool {
+    if candidate.eq_ignore_ascii_case(input) {
+        return true;
+    }
+    let a = normalize_id(candidate);
+    let b = normalize_id(input);
+    !a.is_empty() && !b.is_empty() && (a == b || a.contains(&b) || b.contains(&a))
+}
+
+#[cfg(feature = "raw")]
+fn normalize_id(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
