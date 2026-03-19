@@ -242,6 +242,7 @@ async fn connect_and_stream(
     }
 
     let mut notifications = peripheral.notifications().await?;
+    let mut silence_timeouts = 0u64;
 
     let mut device_state = state.write().await;
     *device_state = DeviceState::Streaming;
@@ -261,6 +262,7 @@ async fn connect_and_stream(
 
         match tokio::time::timeout(tokio::time::Duration::from_secs(5), notifications.next()).await {
             Ok(Some(notification)) => {
+                silence_timeouts = 0;
                 received_packets += 1;
                 let payload = notification.value;
                 if payload.is_empty() || payload.len() < min_payload_len {
@@ -341,16 +343,28 @@ async fn connect_and_stream(
             }
             Ok(None) => break,
             Err(_) => {
+                silence_timeouts += 1;
                 {
                     let mut s = debug_stats.write().await;
                     s.received_notifications = received_packets;
                     s.decoded_packets = decrypted_packets;
                     s.timeout_count += 1;
                 }
+
+                if silence_timeouts >= 1 {
+                    for ch in &notify_chars {
+                        let _ = peripheral.subscribe(ch).await;
+                    }
+                    if let Ok(w) = send_start_stream_command(&peripheral).await {
+                        let mut s = debug_stats.write().await;
+                        s.start_command_writes += w as u64;
+                    }
+                }
                 log::warn!(
-                    "No BLE notifications for 5s (received={}, decrypted={})",
+                    "No BLE notifications for 5s (received={}, decrypted={}, silence_timeouts={}); re-issued subscribe/start",
                     received_packets,
-                    decrypted_packets
+                    decrypted_packets,
+                    silence_timeouts,
                 );
             }
         }
