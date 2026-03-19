@@ -336,6 +336,17 @@ impl CortexHandle {
         self.send_raw(close_session(&s.auth_token, &s.session_id)).await
     }
 
+    /// Query available headsets.
+    ///
+    /// The result is emitted as a [`CortexEvent::HeadsetsQueried`] event
+    /// containing a list of [`HeadsetInfo`] structs.  When
+    /// [`CortexClientConfig::auto_create_session`] is `true`, the client
+    /// also automatically connects to the target headset and creates a
+    /// session.
+    pub async fn query_headsets(&self) -> Result<()> {
+        self.send_raw(query_headsets()).await
+    }
+
     /// Get Cortex service info.
     pub async fn get_cortex_info(&self) -> Result<()> {
         self.send_raw(get_cortex_info()).await
@@ -652,6 +663,13 @@ async fn handle_result(
 
         QUERY_HEADSET_ID => {
             if let Some(headsets) = result.as_array() {
+                // Always emit the headset list so callers can enumerate
+                // available devices (e.g. for a device-selection UI).
+                let infos: Vec<crate::types::HeadsetInfo> = headsets.iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                let _ = event_tx.send(CortexEvent::HeadsetsQueried(infos)).await;
+
                 let mut s = state.lock().await;
 
                 if headsets.is_empty() {
@@ -1442,7 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_headset_query_connected() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let config = CortexClientConfig {
             client_id: "test".into(),
             client_secret: "test".into(),
@@ -1459,6 +1477,15 @@ mod tests {
         ]);
         let responses = handle_result(QUERY_HEADSET_ID, &result, &config, &state, &tx).await;
 
+        // Should emit HeadsetsQueried event
+        if let Some(CortexEvent::HeadsetsQueried(headsets)) = rx.recv().await {
+            assert_eq!(headsets.len(), 1);
+            assert_eq!(headsets[0].id, "EPOCX-001");
+            assert_eq!(headsets[0].status, "connected");
+        } else {
+            panic!("Expected HeadsetsQueried event");
+        }
+
         // Should produce a createSession request
         assert_eq!(responses.len(), 1);
         let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
@@ -1468,7 +1495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_headset_query_discovered() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let config = CortexClientConfig {
             client_id: "test".into(),
             client_secret: "test".into(),
@@ -1485,10 +1512,71 @@ mod tests {
         ]);
         let responses = handle_result(QUERY_HEADSET_ID, &result, &config, &state, &tx).await;
 
+        // Should emit HeadsetsQueried event
+        if let Some(CortexEvent::HeadsetsQueried(headsets)) = rx.recv().await {
+            assert_eq!(headsets.len(), 1);
+            assert_eq!(headsets[0].id, "INSIGHT-002");
+            assert_eq!(headsets[0].status, "discovered");
+        } else {
+            panic!("Expected HeadsetsQueried event");
+        }
+
         // Should produce a controlDevice connect
         assert_eq!(responses.len(), 1);
         let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
         assert_eq!(resp["method"], "controlDevice");
         assert_eq!(resp["params"]["command"], "connect");
+    }
+
+    #[tokio::test]
+    async fn test_handle_headset_query_multiple_headsets() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = CortexClientConfig {
+            client_id: "test".into(),
+            client_secret: "test".into(),
+            ..Default::default() // no headset_id → picks first
+        };
+        let state = Arc::new(Mutex::new(ClientState {
+            auth_token: "tok".into(),
+            session_id: String::new(),
+            headset_id: String::new(),
+        }));
+        let result = serde_json::json!([
+            {"id": "EPOCX-AAA", "status": "connected", "connectedBy": "dongle"},
+            {"id": "INSIGHT-BBB", "status": "discovered", "connectedBy": ""}
+        ]);
+        let responses = handle_result(QUERY_HEADSET_ID, &result, &config, &state, &tx).await;
+
+        // HeadsetsQueried should list both headsets
+        if let Some(CortexEvent::HeadsetsQueried(headsets)) = rx.recv().await {
+            assert_eq!(headsets.len(), 2);
+            assert_eq!(headsets[0].id, "EPOCX-AAA");
+            assert_eq!(headsets[1].id, "INSIGHT-BBB");
+        } else {
+            panic!("Expected HeadsetsQueried event");
+        }
+
+        // With no headset_id configured, picks first → createSession for EPOCX-AAA
+        assert_eq!(responses.len(), 1);
+        assert_eq!(state.lock().await.headset_id, "EPOCX-AAA");
+    }
+
+    #[tokio::test]
+    async fn test_handle_headset_query_empty() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        let result = serde_json::json!([]);
+        let responses = handle_result(QUERY_HEADSET_ID, &result, &config, &state, &tx).await;
+
+        // Should still emit HeadsetsQueried with empty list
+        if let Some(CortexEvent::HeadsetsQueried(headsets)) = rx.recv().await {
+            assert!(headsets.is_empty());
+        } else {
+            panic!("Expected HeadsetsQueried event");
+        }
+
+        // No connect/create responses when no headsets
+        assert!(responses.is_empty());
     }
 }

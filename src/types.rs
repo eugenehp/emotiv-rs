@@ -248,6 +248,14 @@ pub enum CortexEvent {
     /// Mental command training threshold.
     McTrainingThreshold(serde_json::Value),
 
+    // ── Headsets ─────────────────────────────────────────────────────────
+    /// List of headsets returned by `queryHeadsets`.
+    ///
+    /// Emitted every time the Cortex service responds to a headset query.
+    /// Each [`HeadsetInfo`] contains the headset ID, connection status
+    /// (`"discovered"`, `"connecting"`, `"connected"`), and transport.
+    HeadsetsQueried(Vec<HeadsetInfo>),
+
     // ── Warnings ─────────────────────────────────────────────────────────
     /// A warning from the Cortex service.
     Warning { code: i64, message: serde_json::Value },
