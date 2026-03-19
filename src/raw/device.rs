@@ -253,6 +253,9 @@ async fn connect_and_stream(
     let mut active_notify_uuid: Option<Uuid> = None;
     let min_payload_len = min_payload_len_for_model(info.model);
     let required_channels = required_channels_for_model(info.model);
+    let fallback_required_channels = fallback_required_channels_for_model(info.model);
+    let mut partial_mode = false;
+    let mut partial_hits = vec![0u8; decryptors.len()];
     loop {
         if matches!(
             *state.read().await,
@@ -279,7 +282,12 @@ async fn connect_and_stream(
                 let mut decoded = None;
                 if let Some(idx) = active_decryptor_idx {
                     if let Ok(data) = decryptors[idx].1.decrypt_eeg_packet(&payload) {
-                        if data.eeg_uv.len() >= required_channels {
+                        let ok_len = if partial_mode {
+                            data.eeg_uv.len() >= fallback_required_channels
+                        } else {
+                            data.eeg_uv.len() >= required_channels
+                        };
+                        if ok_len {
                             decoded = Some(data);
                         }
                     }
@@ -291,21 +299,35 @@ async fn connect_and_stream(
                             continue;
                         }
                         if let Ok(data) = decryptor.decrypt_eeg_packet(&payload) {
-                            if data.eeg_uv.len() < required_channels {
+                            let channels = data.eeg_uv.len();
+                            if channels < fallback_required_channels {
                                 continue;
                             }
+
+                            if channels < required_channels {
+                                partial_hits[idx] = partial_hits[idx].saturating_add(1);
+                                if partial_hits[idx] < 6 {
+                                    continue;
+                                }
+                                partial_mode = true;
+                            } else {
+                                partial_mode = false;
+                            }
+
                             active_decryptor_idx = Some(idx);
                             log::info!(
-                                "Decryption synchronized with serial/model candidate: {}/{}",
+                                "Decryption synchronized with serial/model candidate: {}/{}{}",
                                 decryptors[idx].0,
-                                decryptors[idx].2.name()
+                                decryptors[idx].2.name(),
+                                if partial_mode { " (partial mode)" } else { "" }
                             );
                             {
                                 let mut s = debug_stats.write().await;
                                 s.active_serial_candidate = Some(format!(
-                                    "{}/{}",
+                                    "{}/{}{}",
                                     decryptors[idx].0,
-                                    decryptors[idx].2.name()
+                                    decryptors[idx].2.name(),
+                                    if partial_mode { ":partial" } else { "" }
                                 ));
                             }
                             decoded = Some(data);
@@ -394,6 +416,18 @@ async fn connect_and_stream(
 #[cfg(feature = "raw")]
 fn required_channels_for_model(model: HeadsetModel) -> usize {
     model.channel_count()
+}
+
+#[cfg(feature = "raw")]
+fn fallback_required_channels_for_model(model: HeadsetModel) -> usize {
+    match model {
+        HeadsetModel::Insight | HeadsetModel::Insight2 => 5,
+        HeadsetModel::MN8 | HeadsetModel::Xtrodes => 8,
+        HeadsetModel::EpocX
+        | HeadsetModel::EpocPlus
+        | HeadsetModel::EpocStd
+        | HeadsetModel::EpocFlex => 10,
+    }
 }
 
 /// Discover BLE devices (returns empty if feature disabled).
