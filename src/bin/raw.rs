@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    let debug_view = args.contains(&"--debug-view".to_string());
 
     // Handle --list flag
     if args.contains(&"--list".to_string()) {
@@ -56,8 +57,8 @@ async fn main() -> Result<()> {
     #[cfg(feature = "raw")]
     {
         match device_address {
-            Some(addr) => connect_to_device(&addr).await?,
-            None => connect_to_first_device().await?,
+            Some(addr) => connect_to_device(&addr, debug_view).await?,
+            None => connect_to_first_device(debug_view).await?,
         }
     }
 
@@ -104,7 +105,7 @@ async fn list_devices() -> Result<()> {
 }
 
 #[cfg(feature = "raw")]
-async fn connect_to_first_device() -> Result<()> {
+async fn connect_to_first_device(debug_view: bool) -> Result<()> {
     info!("Discovering Emotiv devices...");
     let devices = raw::discover_devices().await?;
 
@@ -113,7 +114,8 @@ async fn connect_to_first_device() -> Result<()> {
         return Ok(());
     }
 
-    let device = &devices[0];
+    let device = select_best_device(&devices)
+        .ok_or_else(|| anyhow::anyhow!("No suitable BLE device candidate found"))?;
     info!(
         "Connecting to {} ({}) [{} / {}] - {}",
         device.model.name(),
@@ -123,12 +125,12 @@ async fn connect_to_first_device() -> Result<()> {
         device.transport
     );
 
-    stream_device(device.clone()).await?;
+    stream_device(device.clone(), debug_view).await?;
     Ok(())
 }
 
 #[cfg(feature = "raw")]
-async fn connect_to_device(address: &str) -> Result<()> {
+async fn connect_to_device(address: &str, debug_view: bool) -> Result<()> {
     let devices = raw::discover_devices().await?;
     let device = devices
         .iter()
@@ -144,13 +146,13 @@ async fn connect_to_device(address: &str) -> Result<()> {
         device.transport
     );
 
-    stream_device(device.clone()).await?;
+    stream_device(device.clone(), debug_view).await?;
     Ok(())
 }
 
 #[cfg(feature = "raw")]
-async fn stream_device(device: raw::DeviceInfo) -> Result<()> {
-    let (mut rx, _handle) = raw::RawDevice::from_info(device).connect().await?;
+async fn stream_device(device: raw::DeviceInfo, debug_view: bool) -> Result<()> {
+    let (mut rx, handle) = raw::RawDevice::from_info(device).connect().await?;
 
     info!("✅ Connected! Streaming EEG data...");
     info!("Press Ctrl-C to stop.\n");
@@ -173,12 +175,31 @@ async fn stream_device(device: raw::DeviceInfo) -> Result<()> {
     println!("┌────────────────────────────────────────────────────────────────────┐");
     println!("│ EEG Stream - Press Ctrl-C to quit                                  │");
     println!("├────────────────────────────────────────────────────────────────────┤");
+    if debug_view {
+        println!("│ DEBUG view enabled: showing rx/decode counters every 2s            │");
+        println!("├────────────────────────────────────────────────────────────────────┤");
+    }
+
+    let mut debug_tick = tokio::time::interval(std::time::Duration::from_secs(2));
 
     loop {
         tokio::select! {
             Some(_line) = line_rx.recv() => {
                 // Check for quit command
                 break;
+            }
+            _ = debug_tick.tick(), if debug_view => {
+                let stats = handle.debug_stats().await;
+                println!(
+                    "│ DBG rx={} dec={} fail={} timeout={} last_uuid={} len={} key={}",
+                    stats.received_notifications,
+                    stats.decoded_packets,
+                    stats.decrypt_failures,
+                    stats.timeout_count,
+                    stats.last_notify_uuid.as_deref().unwrap_or("-"),
+                    stats.last_payload_len,
+                    stats.active_serial_candidate.as_deref().unwrap_or("-")
+                );
             }
             Some(data) = rx.recv() => {
                 packet_count += 1;
@@ -242,4 +263,49 @@ fn normalize_id(s: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
+}
+
+#[cfg(feature = "raw")]
+fn select_best_device(devices: &[raw::DeviceInfo]) -> Option<&raw::DeviceInfo> {
+    devices
+        .iter()
+        .max_by_key(|d| device_score(d))
+}
+
+#[cfg(feature = "raw")]
+fn device_score(d: &raw::DeviceInfo) -> i32 {
+    let mut score = 0;
+    let name = d.name.to_ascii_lowercase();
+    if name != "(unknown)" {
+        score += 20;
+    }
+    if name.contains("emotiv")
+        || name.contains("epoc")
+        || name.contains("insight")
+        || name.contains("flex")
+        || name.contains("mn8")
+        || name.contains("xtrodes")
+    {
+        score += 50;
+    }
+    if d.ble_mac.as_deref().is_some_and(|m| !is_zero_mac(m)) {
+        score += 15;
+    }
+    if !normalize_id(&d.ble_id).is_empty() {
+        score += 10;
+    }
+    if d.is_connected {
+        score += 10;
+    }
+    score
+}
+
+#[cfg(feature = "raw")]
+fn is_zero_mac(mac: &str) -> bool {
+    let only_hex: String = mac
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_lowercase();
+    !only_hex.is_empty() && only_hex.chars().all(|c| c == '0')
 }

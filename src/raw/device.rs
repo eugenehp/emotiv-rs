@@ -48,10 +48,23 @@ pub struct DeviceInfo {
     pub is_connected: bool,
 }
 
+/// Runtime debug statistics for raw BLE stream processing.
+#[derive(Debug, Clone, Default)]
+pub struct StreamDebugStats {
+    pub received_notifications: u64,
+    pub decoded_packets: u64,
+    pub decrypt_failures: u64,
+    pub timeout_count: u64,
+    pub last_notify_uuid: Option<String>,
+    pub last_payload_len: usize,
+    pub active_serial_candidate: Option<String>,
+}
+
 /// Handle to a connected device for sending commands.
 pub struct RawDeviceHandle {
     state: Arc<RwLock<DeviceState>>,
     command_tx: mpsc::Sender<DeviceCommand>,
+    debug_stats: Arc<RwLock<StreamDebugStats>>,
 }
 
 impl RawDeviceHandle {
@@ -68,6 +81,11 @@ impl RawDeviceHandle {
     /// Check current connection state.
     pub async fn state(&self) -> DeviceState {
         *self.state.read().await
+    }
+
+    /// Snapshot of live BLE receive/decode stats.
+    pub async fn debug_stats(&self) -> StreamDebugStats {
+        self.debug_stats.read().await.clone()
     }
 }
 
@@ -119,13 +137,15 @@ impl RawDevice {
     ) -> Result<(mpsc::Receiver<DecryptedData>, RawDeviceHandle)> {
         let (tx, rx) = mpsc::channel(256);
         let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let debug_stats = Arc::new(RwLock::new(StreamDebugStats::default()));
 
         let state = Arc::clone(&self.state);
+        let debug_stats_task = Arc::clone(&debug_stats);
         let info = self.info.clone();
 
         // Spawn connection task
         tokio::spawn(async move {
-            if let Err(e) = connect_and_stream(info, tx, state).await {
+            if let Err(e) = connect_and_stream(info, tx, state, debug_stats_task).await {
                 log::error!("Device streaming error: {}", e);
             }
         });
@@ -133,6 +153,7 @@ impl RawDevice {
         let handle = RawDeviceHandle {
             state: Arc::clone(&self.state),
             command_tx: cmd_tx,
+            debug_stats,
         };
 
         Ok((rx, handle))
@@ -149,12 +170,14 @@ async fn connect_and_stream(
     info: DeviceInfo,
     tx: mpsc::Sender<DecryptedData>,
     state: Arc<RwLock<DeviceState>>,
+    debug_stats: Arc<RwLock<StreamDebugStats>>,
 ) -> Result<()> {
     #[cfg(not(feature = "raw"))]
     {
         let _ = info;
         let _ = tx;
         let _ = state;
+        let _ = debug_stats;
         return Err(anyhow!("raw feature is disabled"));
     }
 
@@ -240,6 +263,10 @@ async fn connect_and_stream(
                                 "Decryption synchronized with serial candidate: {}",
                                 decryptors[idx].0
                             );
+                            {
+                                let mut s = debug_stats.write().await;
+                                s.active_serial_candidate = Some(decryptors[idx].0.clone());
+                            }
                             decoded = Some(data);
                             break;
                         }
@@ -248,10 +275,25 @@ async fn connect_and_stream(
 
                 if let Some(data) = decoded {
                     decrypted_packets += 1;
+                    {
+                        let mut s = debug_stats.write().await;
+                        s.received_notifications = received_packets;
+                        s.decoded_packets = decrypted_packets;
+                        s.last_notify_uuid = Some(notification.uuid.to_string());
+                        s.last_payload_len = payload.len();
+                    }
                     if tx.send(data).await.is_err() {
                         break;
                     }
                 } else if received_packets % 50 == 0 {
+                    {
+                        let mut s = debug_stats.write().await;
+                        s.received_notifications = received_packets;
+                        s.decoded_packets = decrypted_packets;
+                        s.decrypt_failures += 1;
+                        s.last_notify_uuid = Some(notification.uuid.to_string());
+                        s.last_payload_len = payload.len();
+                    }
                     log::warn!(
                         "Receiving BLE notifications but cannot decrypt yet (received={}, decrypted=0). Check serial source.",
                         received_packets
@@ -260,6 +302,12 @@ async fn connect_and_stream(
             }
             Ok(None) => break,
             Err(_) => {
+                {
+                    let mut s = debug_stats.write().await;
+                    s.received_notifications = received_packets;
+                    s.decoded_packets = decrypted_packets;
+                    s.timeout_count += 1;
+                }
                 log::warn!(
                     "No BLE notifications for 5s (received={}, decrypted={})",
                     received_packets,
@@ -273,6 +321,12 @@ async fn connect_and_stream(
 
     let mut device_state = state.write().await;
     *device_state = DeviceState::Disconnected;
+
+    {
+        let mut s = debug_stats.write().await;
+        s.received_notifications = received_packets;
+        s.decoded_packets = decrypted_packets;
+    }
 
     Ok(())
     }
@@ -297,13 +351,22 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
             continue;
         };
 
-        let name = props.local_name.unwrap_or_else(|| "(unknown)".to_string());
+        let raw_name = props.local_name.unwrap_or_default();
+        let name = if raw_name.trim().is_empty() {
+            "(unknown)".to_string()
+        } else {
+            raw_name.clone()
+        };
         let ble_id = peripheral.id().to_string();
-        let ble_mac = Some(props.address.to_string());
+        let mac_raw = props.address.to_string();
+        let ble_mac = if is_zero_mac(&mac_raw) { None } else { Some(mac_raw) };
         let address = ble_id.clone();
         let is_connected = peripheral.is_connected().await.unwrap_or(false);
         let emotiv_candidate = is_emotiv_candidate(&name, &props.services, is_connected);
-        let has_any_signal = !name.is_empty() || !props.services.is_empty() || is_connected;
+        let has_any_signal = !raw_name.trim().is_empty()
+            || !props.services.is_empty()
+            || is_connected
+            || ble_mac.is_some();
 
         let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocX);
         let serial = infer_serial(&name, ble_mac.as_deref().unwrap_or(&address));
@@ -560,6 +623,16 @@ fn normalize_id(s: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
+}
+
+#[cfg(feature = "raw")]
+fn is_zero_mac(mac: &str) -> bool {
+    let only_hex: String = mac
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_lowercase();
+    !only_hex.is_empty() && only_hex.chars().all(|c| c == '0')
 }
 
 #[cfg(feature = "raw")]
