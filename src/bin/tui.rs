@@ -522,7 +522,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 #[inline] fn key_span(s:&str)->Span<'_>{Span::styled(s,Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))}
 
 fn draw_eeg_charts(frame: &mut Frame, area: Rect, app: &App) {
-    let n=app.num_channels.max(1).min(MAX_CHANNELS);
+    let n=app
+        .num_channels
+        .max(app.channel_labels.len())
+        .max(1)
+        .min(MAX_CHANNELS);
     let constraints:Vec<Constraint>=(0..n).map(|_|Constraint::Ratio(1,n as u32)).collect();
     let rows=Layout::vertical(constraints).split(area);
     let y_range=app.y_range();
@@ -819,6 +823,7 @@ async fn main() -> Result<()> {
                                 .into_iter()
                                 .map(|x| x.to_string())
                                 .collect();
+                            s.num_channels = s.channel_labels.len().min(MAX_CHANNELS);
                         }
 
                         match raw::RawDevice::from_info(device).connect().await {
