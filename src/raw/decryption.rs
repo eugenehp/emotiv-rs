@@ -277,7 +277,8 @@ fn extract_16bit_be_samples(data: &[u8], channel_count: usize) -> Vec<u16> {
         if offset + 1 >= data.len() {
             break;
         }
-        samples.push(u16::from_be_bytes([data[offset], data[offset + 1]]));
+        let word = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        samples.push(word & 0x3FFF);
     }
     samples
 }

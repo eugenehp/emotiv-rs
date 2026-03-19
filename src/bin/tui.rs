@@ -937,6 +937,12 @@ async fn main() -> Result<()> {
                                                     }
                                                     s.push_eeg(&data.eeg_uv);
                                                     s.signal = Some(data.signal_quality as f64);
+                                                    if data.battery_percent <= 100 {
+                                                        s.battery = Some(match s.battery {
+                                                            Some(prev) => (prev * 0.8) + (data.battery_percent as f64 * 0.2),
+                                                            None => data.battery_percent as f64,
+                                                        });
+                                                    }
                                                 }
                                                 None => break,
                                             }
