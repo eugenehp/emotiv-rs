@@ -172,6 +172,12 @@ const Y_SCALES: &[f64] = &[2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000
 const DEFAULT_SCALE: usize = 5;
 const SMOOTH_WINDOW: usize = 9;
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+#[cfg(feature = "raw")]
+const RAW_BATTERY_COMMIT_SECS: u64 = 3;
+#[cfg(feature = "raw")]
+const RAW_BATTERY_MAX_STEP_PER_COMMIT: f64 = 1.0;
+#[cfg(feature = "raw")]
+const RAW_BATTERY_SAMPLE_WINDOW: usize = 1024;
 
 const COLORS: [Color; 14] = [
     Color::Cyan, Color::Yellow, Color::Green, Color::Magenta,
@@ -405,7 +411,7 @@ impl App {
             #[cfg(feature = "raw")]
             raw_last_decoded_channels: 0,
             #[cfg(feature = "raw")]
-            raw_battery_samples: VecDeque::with_capacity(256),
+            raw_battery_samples: VecDeque::with_capacity(RAW_BATTERY_SAMPLE_WINDOW),
             #[cfg(feature = "raw")]
             raw_battery_last_commit: None,
             #[cfg(feature = "simulate")]
@@ -947,14 +953,14 @@ async fn main() -> Result<()> {
                                                     s.signal = Some(data.signal_quality as f64);
                                                     if data.battery_percent <= 100 {
                                                         s.raw_battery_samples.push_back(data.battery_percent);
-                                                        while s.raw_battery_samples.len() > 256 {
+                                                        while s.raw_battery_samples.len() > RAW_BATTERY_SAMPLE_WINDOW {
                                                             s.raw_battery_samples.pop_front();
                                                         }
 
                                                         let now = Instant::now();
                                                         let should_commit = s
                                                             .raw_battery_last_commit
-                                                            .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                                            .map(|t| now.duration_since(t) >= Duration::from_secs(RAW_BATTERY_COMMIT_SECS))
                                                             .unwrap_or(true);
 
                                                         if should_commit && !s.raw_battery_samples.is_empty() {
@@ -964,7 +970,8 @@ async fn main() -> Result<()> {
 
                                                             let next = match s.battery {
                                                                 Some(prev) => {
-                                                                    let delta = (median - prev).clamp(-1.0, 1.0);
+                                                                    let delta = (median - prev)
+                                                                        .clamp(-RAW_BATTERY_MAX_STEP_PER_COMMIT, RAW_BATTERY_MAX_STEP_PER_COMMIT);
                                                                     (prev + delta).clamp(0.0, 100.0)
                                                                 }
                                                                 None => median,
