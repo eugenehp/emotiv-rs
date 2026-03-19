@@ -280,7 +280,7 @@ mod sim {
             let phi = ch as f64 * PI / 2.5;
             let theta = self.cur_theta * (2.0*PI*6.0*t + phi*0.9).sin();
             let alpha = self.cur_alpha * (2.0*PI*10.0*t + phi).sin();
-            let beta  = self.cur_beta  * (2.0*PI*22.0*t + phi*1.7).sin();
+            let beta  = self.cur_beta  * (2.0*PI*22.0*t + phui*1.7).sin();
             let gamma = self.cur_gamma * (2.0*PI*40.0*t + phi*2.3).sin();
             let nx = t*1000.7 + ch as f64*137.508;
             let noise = ((nx.sin()*9973.1).fract()-0.5)*8.0*self.noise_level;
@@ -358,8 +358,22 @@ struct App {
     smooth: bool,
     connected: bool,
     simulated: bool,
+    #[cfg(feature = "raw")]
+    raw_debug: Option<RawDebugInfo>,
+    #[cfg(feature = "raw")]
+    raw_last_decoded_channels: usize,
     #[cfg(feature = "simulate")]
     sim: sim::SimState,
+}
+
+#[cfg(feature = "raw")]
+#[derive(Clone, Default)]
+struct RawDebugInfo {
+    rx: u64,
+    dec: u64,
+    fail: u64,
+    timeout: u64,
+    key: String,
 }
 
 impl App {
@@ -378,6 +392,10 @@ impl App {
             scale_idx: if simulated{2}else{DEFAULT_SCALE},
             paused: false, smooth: true,
             connected: false, simulated,
+            #[cfg(feature = "raw")]
+            raw_debug: None,
+            #[cfg(feature = "raw")]
+            raw_last_decoded_channels: 0,
             #[cfg(feature = "simulate")]
             sim: sim::SimState::new(),
         }
@@ -502,6 +520,29 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut extra = String::new();
     #[cfg(feature = "simulate")]
     if app.simulated { extra = format!("noise={:.0}% gain={:.1}x", app.sim.noise_level*100.0, app.sim.gain); }
+
+    #[cfg(feature = "raw")]
+    {
+        if !app.simulated {
+            if let Some(dbg) = &app.raw_debug {
+                let key = if dbg.key.len() > 24 {
+                    format!("{}…", &dbg.key[..24])
+                } else {
+                    dbg.key.clone()
+                };
+                extra = format!(
+                    "raw rx/dec/fail/tmo={}/{}/{}/{} ch={}/{} key={}",
+                    dbg.rx,
+                    dbg.dec,
+                    dbg.fail,
+                    dbg.timeout,
+                    app.raw_last_decoded_channels,
+                    app.num_channels,
+                    key
+                );
+            }
+        }
+    }
 
     let line = Line::from(vec![
         Span::styled(" EMOTIV ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
@@ -827,16 +868,38 @@ async fn main() -> Result<()> {
                         }
 
                         match raw::RawDevice::from_info(device).connect().await {
-                            Ok((mut rx, _handle)) => {
+                            Ok((mut rx, handle)) => {
                                 {
                                     let mut s = app_clone.lock().unwrap();
                                     s.connected = true;
                                 }
-                                while let Some(data) = rx.recv().await {
-                                    let mut s = app_clone.lock().unwrap();
-                                    s.push_eeg(&data.eeg_uv);
-                                    s.battery = Some(data.battery_percent as f64);
-                                    s.signal = Some(data.signal_quality as f64);
+                                let mut debug_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+                                loop {
+                                    tokio::select! {
+                                        _ = debug_tick.tick() => {
+                                            let stats = handle.debug_stats().await;
+                                            let mut s = app_clone.lock().unwrap();
+                                            s.raw_debug = Some(RawDebugInfo {
+                                                rx: stats.received_notifications,
+                                                dec: stats.decoded_packets,
+                                                fail: stats.decrypt_failures,
+                                                timeout: stats.timeout_count,
+                                                key: stats.active_serial_candidate.unwrap_or_else(|| "-".to_string()),
+                                            });
+                                        }
+                                        maybe_data = rx.recv() => {
+                                            match maybe_data {
+                                                Some(data) => {
+                                                    let mut s = app_clone.lock().unwrap();
+                                                    s.raw_last_decoded_channels = data.eeg_uv.len();
+                                                    s.push_eeg(&data.eeg_uv);
+                                                    s.battery = Some(data.battery_percent as f64);
+                                                    s.signal = Some(data.signal_quality as f64);
+                                                }
+                                                None => break,
+                                            }
+                                        }
+                                    }
                                 }
                                 let mut s = app_clone.lock().unwrap();
                                 s.connected = false;
