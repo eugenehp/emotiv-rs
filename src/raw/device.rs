@@ -381,7 +381,12 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
         let ble_mac = if is_zero_mac(&mac_raw) { None } else { Some(mac_raw) };
         let address = ble_id.clone();
         let is_connected = peripheral.is_connected().await.unwrap_or(false);
-        let emotiv_candidate = is_emotiv_candidate(&name, &props.services, is_connected);
+        let emotiv_candidate = is_emotiv_candidate(
+            &name,
+            &props.services,
+            &props.manufacturer_data,
+            is_connected,
+        );
         let has_any_signal = !raw_name.trim().is_empty()
             || !props.services.is_empty()
             || is_connected
@@ -412,11 +417,23 @@ async fn discover_ble_devices() -> Result<Vec<DeviceInfo>> {
 
     adapter.stop_scan().await.ok();
     if matched_devices.is_empty() {
-        log::warn!(
-            "No explicit Emotiv BLE advertisements found; returning all visible BLE peripherals ({})",
-            fallback_devices.len()
-        );
-        Ok(fallback_devices)
+        let allow_fallback = std::env::var("EMOTIV_RAW_ALLOW_FALLBACK")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if allow_fallback {
+            log::warn!(
+                "No explicit Emotiv BLE advertisements found; fallback enabled, returning all visible BLE peripherals ({})",
+                fallback_devices.len()
+            );
+            Ok(fallback_devices)
+        } else {
+            log::warn!(
+                "No explicit Emotiv BLE advertisements found; returning 0 devices (set EMOTIV_RAW_ALLOW_FALLBACK=1 to inspect all)",
+            );
+            Ok(Vec::new())
+        }
     } else {
         Ok(matched_devices)
     }
@@ -615,28 +632,45 @@ fn select_notify_characteristics(peripheral: &Peripheral) -> Vec<btleplug::api::
 }
 
 #[cfg(feature = "raw")]
-fn is_emotiv_candidate(name: &str, services: &[Uuid], is_connected: bool) -> bool {
+fn is_emotiv_candidate(
+    name: &str,
+    services: &[Uuid],
+    manufacturer_data: &std::collections::HashMap<u16, Vec<u8>>,
+    is_connected: bool,
+) -> bool {
     let lname = name.to_ascii_lowercase();
-    if lname.contains("emotiv")
-        || lname.contains("epoc")
-        || lname.contains("insight")
-        || lname.contains("flex")
-        || lname.contains("mn8")
-        || lname.contains("xtrodes")
-    {
+    let name_match = lname.starts_with("emotiv-")
+        || lname.contains("emotiv")
+        || lname.starts_with("epoc")
+        || lname.starts_with("insight")
+        || lname.starts_with("mn8")
+        || lname.starts_with("xtrodes")
+        || lname.starts_with("flex");
+
+    if name_match {
         return true;
     }
 
-    if is_connected {
+    // 0x0422 from benchmark mock advertisement (EMOTIV vendor id)
+    if manufacturer_data.contains_key(&0x0422) {
         return true;
     }
 
-    services.iter().any(|u| {
+    let service_match = services.iter().any(|u| {
         let s = u.to_string().to_ascii_lowercase();
         s.starts_with("00001100-d102-11e1-9b23-00025b00a5a5")
             || s.starts_with("00001101-d102-11e1-9b23-00025b00a5a5")
             || s.starts_with("00001102-d102-11e1-9b23-00025b00a5a5")
-    })
+            || s.starts_with("00001103-d102-11e1-9b23-00025b00a5a5")
+    });
+
+    if service_match {
+        return true;
+    }
+
+    // Connected devices are not necessarily Emotiv; do not accept by connected-only.
+    let _ = is_connected;
+    false
 }
 
 #[cfg(feature = "raw")]
