@@ -59,6 +59,7 @@ impl RawDeviceHandle {
 }
 
 /// Device command.
+#[allow(dead_code)]
 enum DeviceCommand {
     Disconnect,
     StartStreaming,

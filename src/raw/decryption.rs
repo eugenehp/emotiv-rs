@@ -13,6 +13,7 @@ use anyhow::{anyhow, Result};
 /// Full decrypted packet state.
 pub struct Decryptor {
     model: HeadsetModel,
+    #[allow(dead_code)]
     serial: String,
     aes_key: Vec<u8>,
     counter: u32,
