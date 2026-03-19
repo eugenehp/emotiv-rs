@@ -365,6 +365,10 @@ struct App {
     raw_debug: Option<RawDebugInfo>,
     #[cfg(feature = "raw")]
     raw_last_decoded_channels: usize,
+    #[cfg(feature = "raw")]
+    raw_battery_samples: VecDeque<u8>,
+    #[cfg(feature = "raw")]
+    raw_battery_last_commit: Option<Instant>,
     #[cfg(feature = "simulate")]
     sim: sim::SimState,
 }
@@ -400,6 +404,10 @@ impl App {
             raw_debug: None,
             #[cfg(feature = "raw")]
             raw_last_decoded_channels: 0,
+            #[cfg(feature = "raw")]
+            raw_battery_samples: VecDeque::with_capacity(256),
+            #[cfg(feature = "raw")]
+            raw_battery_last_commit: None,
             #[cfg(feature = "simulate")]
             sim: sim::SimState::new(),
         }
@@ -938,10 +946,32 @@ async fn main() -> Result<()> {
                                                     s.push_eeg(&data.eeg_uv);
                                                     s.signal = Some(data.signal_quality as f64);
                                                     if data.battery_percent <= 100 {
-                                                        s.battery = Some(match s.battery {
-                                                            Some(prev) => (prev * 0.8) + (data.battery_percent as f64 * 0.2),
-                                                            None => data.battery_percent as f64,
-                                                        });
+                                                        s.raw_battery_samples.push_back(data.battery_percent);
+                                                        while s.raw_battery_samples.len() > 256 {
+                                                            s.raw_battery_samples.pop_front();
+                                                        }
+
+                                                        let now = Instant::now();
+                                                        let should_commit = s
+                                                            .raw_battery_last_commit
+                                                            .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                                            .unwrap_or(true);
+
+                                                        if should_commit && !s.raw_battery_samples.is_empty() {
+                                                            let mut vals: Vec<u8> = s.raw_battery_samples.iter().copied().collect();
+                                                            vals.sort_unstable();
+                                                            let median = vals[vals.len() / 2] as f64;
+
+                                                            let next = match s.battery {
+                                                                Some(prev) => {
+                                                                    let delta = (median - prev).clamp(-1.0, 1.0);
+                                                                    (prev + delta).clamp(0.0, 100.0)
+                                                                }
+                                                                None => median,
+                                                            };
+                                                            s.battery = Some(next);
+                                                            s.raw_battery_last_commit = Some(now);
+                                                        }
                                                     }
                                                 }
                                                 None => break,
