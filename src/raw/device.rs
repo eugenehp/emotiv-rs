@@ -190,11 +190,15 @@ async fn connect_and_stream(
     drop(device_state);
 
     let adapter = default_adapter().await?;
-    adapter.start_scan(ScanFilter::default()).await.ok();
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    let peripheral = find_peripheral(&adapter, &info)
-        .await?
-        .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?;
+    let peripheral = if let Some(p) = find_peripheral(&adapter, &info).await? {
+        p
+    } else {
+        adapter.start_scan(ScanFilter::default()).await.ok();
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        find_peripheral(&adapter, &info)
+            .await?
+            .ok_or_else(|| anyhow!("BLE device not found: {}", info.address))?
+    };
 
     if !peripheral.is_connected().await.unwrap_or(false) {
         peripheral.connect().await?;
@@ -460,6 +464,8 @@ async fn find_peripheral(
         .unwrap_or_default();
     let target_name = normalize_id(&info.name);
 
+    let mut scored: Vec<(i32, Peripheral)> = Vec::new();
+
     for p in adapter.peripherals().await? {
         let pid = p.id().to_string();
         let pid_norm = normalize_id(&pid);
@@ -474,15 +480,67 @@ async fn find_peripheral(
             .map(|n| normalize_id(n))
             .unwrap_or_default();
 
-        if (!target_id.is_empty() && pid_norm == target_id)
+        let exact = (!target_id.is_empty() && pid_norm == target_id)
             || (!target_ble_id.is_empty() && pid_norm == target_ble_id)
             || (!target_mac.is_empty() && !mac_norm.is_empty() && target_mac == mac_norm)
-            || (!target_name.is_empty() && !name_norm.is_empty() && target_name == name_norm)
-        {
+            || (!target_name.is_empty() && !name_norm.is_empty() && target_name == name_norm);
+
+        if exact {
             return Ok(Some(p));
         }
+
+        let mut score = 0i32;
+
+        if !target_name.is_empty() && !name_norm.is_empty() {
+            if target_name == name_norm {
+                score += 80;
+            } else if name_norm.contains(&target_name) || target_name.contains(&name_norm) {
+                score += 45;
+            }
+        }
+
+        if !target_id.is_empty() && !pid_norm.is_empty() {
+            if pid_norm.contains(&target_id) || target_id.contains(&pid_norm) {
+                score += 25;
+            }
+        }
+
+        if !target_ble_id.is_empty() && !pid_norm.is_empty() {
+            if pid_norm.contains(&target_ble_id) || target_ble_id.contains(&pid_norm) {
+                score += 20;
+            }
+        }
+
+        if !target_mac.is_empty() && !mac_norm.is_empty() {
+            if target_mac == mac_norm {
+                score += 90;
+            } else if mac_norm.contains(&target_mac) || target_mac.contains(&mac_norm) {
+                score += 30;
+            }
+        }
+
+        if let Some(pr) = &props {
+            if pr.services.iter().any(|u| {
+                let s = u.to_string().to_ascii_lowercase();
+                s.starts_with("00001100-d102-11e1-9b23-00025b00a5a5")
+                    || s.starts_with("00001101-d102-11e1-9b23-00025b00a5a5")
+                    || s.starts_with("00001102-d102-11e1-9b23-00025b00a5a5")
+            }) {
+                score += 35;
+            }
+        }
+
+        if p.is_connected().await.unwrap_or(false) {
+            score += 20;
+        }
+
+        if score > 0 {
+            scored.push((score, p));
+        }
     }
-    Ok(None)
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(scored.into_iter().next().map(|(_, p)| p))
 }
 
 #[cfg(feature = "raw")]
