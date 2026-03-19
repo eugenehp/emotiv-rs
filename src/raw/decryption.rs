@@ -109,7 +109,8 @@ impl Decryptor {
 fn min_required_channels(model: HeadsetModel) -> usize {
     match model {
         HeadsetModel::Insight | HeadsetModel::Insight2 => 5,
-        HeadsetModel::MN8 | HeadsetModel::Xtrodes => 8,
+        HeadsetModel::MN8 => 2,
+        HeadsetModel::Xtrodes => 8,
         HeadsetModel::EpocX
         | HeadsetModel::EpocPlus
         | HeadsetModel::EpocStd
@@ -348,10 +349,16 @@ fn extract_battery(data: &[u8]) -> u8 {
     if data.is_empty() {
         return 0;
     }
-    // Battery usually in last byte or specific position
+    // Benchmark parity: convert raw byte to voltage then map ~3.2V..4.2V to 0..100.
     let raw_battery = data[data.len() - 1];
-    // Convert to percentage (0-100)
-    std::cmp::min((raw_battery as f64 / 255.0 * 100.0) as u8, 100)
+    let voltage = 3.0 + (raw_battery as f64 / 255.0) * 1.2;
+    if voltage <= 3.2 {
+        0
+    } else if voltage >= 4.2 {
+        100
+    } else {
+        (((voltage - 3.2) / (4.2 - 3.2)) * 100.0) as u8
+    }
 }
 
 #[cfg(test)]

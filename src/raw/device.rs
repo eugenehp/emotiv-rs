@@ -455,7 +455,8 @@ fn required_channels_for_model(model: HeadsetModel) -> usize {
 fn fallback_required_channels_for_model(model: HeadsetModel) -> usize {
     match model {
         HeadsetModel::Insight | HeadsetModel::Insight2 => 5,
-        HeadsetModel::MN8 | HeadsetModel::Xtrodes => 8,
+        HeadsetModel::MN8 => 2,
+        HeadsetModel::Xtrodes => 8,
         HeadsetModel::EpocX
         | HeadsetModel::EpocPlus
         | HeadsetModel::EpocStd

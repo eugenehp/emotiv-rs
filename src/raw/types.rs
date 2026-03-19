@@ -57,7 +57,7 @@ impl HeadsetModel {
             HeadsetModel::EpocX | HeadsetModel::EpocPlus | HeadsetModel::EpocStd => 14,
             HeadsetModel::EpocFlex => 32,
             HeadsetModel::Insight | HeadsetModel::Insight2 => 5,
-            HeadsetModel::MN8 => 8,
+            HeadsetModel::MN8 => 2,
             HeadsetModel::Xtrodes => 8,
         }
     }
@@ -77,6 +77,7 @@ impl HeadsetModel {
             HeadsetModel::Insight | HeadsetModel::Insight2 => {
                 vec!["AF3", "AF4", "T7", "T8", "Pz"]
             }
+            HeadsetModel::MN8 => vec!["TP9", "TP10"],
             _ => vec![],
         }
     }
@@ -84,10 +85,12 @@ impl HeadsetModel {
     /// Sampling rate (Hz).
     pub fn sampling_rate(&self) -> u32 {
         match self {
-            HeadsetModel::EpocX | HeadsetModel::EpocPlus | HeadsetModel::EpocStd => 128,
+            HeadsetModel::EpocX | HeadsetModel::EpocPlus => 256,
+            HeadsetModel::EpocStd => 128,
             HeadsetModel::EpocFlex => 256,
-            HeadsetModel::Insight | HeadsetModel::Insight2 => 128,
-            HeadsetModel::MN8 => 128,
+            HeadsetModel::Insight => 128,
+            HeadsetModel::Insight2 => 256,
+            HeadsetModel::MN8 => 256,
             HeadsetModel::Xtrodes => 250,
         }
     }
@@ -99,8 +102,8 @@ impl HeadsetModel {
                 (-8399.0, 8399.0)
             }
             HeadsetModel::EpocFlex => (-8399.0, 8399.0),
-            HeadsetModel::Insight | HeadsetModel::Insight2 => (-8192.0, 8192.0),
-            HeadsetModel::MN8 => (-8192.0, 8192.0),
+            HeadsetModel::Insight | HeadsetModel::Insight2 => (-4199.5, 4199.5),
+            HeadsetModel::MN8 => (-4199.5, 4199.5),
             HeadsetModel::Xtrodes => (-32767.0, 32767.0),
         }
     }
