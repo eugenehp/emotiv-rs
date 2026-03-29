@@ -420,12 +420,16 @@ async fn run_ws_loop(
                         }
                         match serde_json::from_str::<Value>(text_str) {
                             Ok(recv) => {
-                                let responses = handle_message(
+                                let (responses, session_ended) = handle_message(
                                     &recv, &config, &state, &event_tx,
                                 ).await;
                                 for resp in responses {
                                     write.send(Message::Text(resp.into())).await
                                         .map_err(|e| anyhow!("WebSocket write failed: {e}"))?;
+                                }
+                                if session_ended {
+                                    info!("Session ended — closing WebSocket loop");
+                                    break;
                                 }
                             }
                             Err(e) => {
@@ -540,18 +544,22 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
+/// Returns `(responses_to_send, session_ended)`.  When `session_ended` is
+/// `true` the caller should break out of the WebSocket loop — the session
+/// was closed by the Cortex service (headset disconnected, streams stopped,
+/// etc.) and no more useful data will arrive.
 async fn handle_message(
     recv: &Value,
     config: &CortexClientConfig,
     state: &Arc<Mutex<ClientState>>,
     event_tx: &mpsc::Sender<CortexEvent>,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let mut responses = Vec::new();
 
     // Stream data (has "sid" field)
     if recv.get("sid").is_some() {
         handle_stream_data(recv, event_tx).await;
-        return responses;
+        return (responses, false);
     }
 
     // Result message
@@ -560,7 +568,7 @@ async fn handle_message(
             let resps = handle_result(id, result, config, state, event_tx).await;
             responses.extend(resps);
         }
-        return responses;
+        return (responses, false);
     }
 
     // Error message
@@ -573,7 +581,7 @@ async fn handle_message(
         let _ = event_tx.send(CortexEvent::Error(
             format!("[req_id={req_id}] {cortex_err}")
         )).await;
-        return responses;
+        return (responses, false);
     }
 
     // Warning message
@@ -605,18 +613,26 @@ async fn handle_message(
                     info!("HEADSET_CONNECTED received but session already active — skipping query");
                 }
             }
-            CORTEX_STOP_ALL_STREAMS => {
+            CORTEX_STOP_ALL_STREAMS | CORTEX_CLOSE_SESSION => {
                 let mut s = state.lock().await;
                 s.session_id.clear();
+                drop(s);
+                warn!("Session ended by Cortex service (code={code})");
+                let _ = event_tx.send(CortexEvent::Disconnected).await;
+                return (responses, true);
             }
             HEADSET_DISCONNECTED | HEADSET_CONNECTION_FAILED => {
                 let headset_msg = message.as_str()
                     .or_else(|| message.get("headsetId").and_then(|v| v.as_str()))
                     .unwrap_or("unknown");
                 warn!("Headset event (code={code}): {headset_msg}");
+                let mut s = state.lock().await;
+                s.session_id.clear();
+                drop(s);
                 // Emit Disconnected so consumers can react immediately
                 // instead of waiting for the data watchdog timeout.
                 let _ = event_tx.send(CortexEvent::Disconnected).await;
+                return (responses, true);
             }
             CORTEX_RECORD_POST_PROCESSING_DONE => {
                 if let Some(record_id) = message.get("recordId").and_then(|v| v.as_str()) {
@@ -631,10 +647,10 @@ async fn handle_message(
             }
             _ => {}
         }
-        return responses;
+        return (responses, false);
     }
 
-    responses
+    (responses, false)
 }
 
 async fn handle_result(
@@ -1430,7 +1446,7 @@ mod tests {
                 "message": {"recordId": "rec-done"}
             }
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
 
         // Warning 30 = CORTEX_RECORD_POST_PROCESSING_DONE
         // Should emit Warning + RecordPostProcessingDone
@@ -1466,7 +1482,7 @@ mod tests {
                 "message": "Profile access denied"
             }
         });
-        let _responses = handle_message(&msg, &config, &state, &tx).await;
+        let (_responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
 
         if let Some(CortexEvent::Error(e)) = rx.recv().await {
             assert!(e.contains("-32046"));
@@ -1487,7 +1503,7 @@ mod tests {
             "eeg": [10.0, 20.0],
             "time": 500.0
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
         assert!(responses.is_empty()); // stream data produces no responses
 
         if let Some(CortexEvent::Eeg(data)) = rx.recv().await {
@@ -1630,7 +1646,8 @@ mod tests {
                 "message": {"headsetId": "EPOCX-001"}
             }
         });
-        let _responses = handle_message(&msg, &config, &state, &tx).await;
+        let (_responses, ended) = handle_message(&msg, &config, &state, &tx).await;
+        assert!(ended, "HEADSET_DISCONNECTED should signal session ended");
 
         let mut found_warning = false;
         let mut found_disconnect = false;
@@ -1648,6 +1665,7 @@ mod tests {
         }
         assert!(found_warning, "Expected Warning event");
         assert!(found_disconnect, "Expected Disconnected event on headset disconnect");
+        assert!(state.lock().await.session_id.is_empty(), "Session should be cleared");
     }
 
     #[tokio::test]
@@ -1661,7 +1679,8 @@ mod tests {
                 "message": "Connection timed out"
             }
         });
-        let _responses = handle_message(&msg, &config, &state, &tx).await;
+        let (_responses, ended) = handle_message(&msg, &config, &state, &tx).await;
+        assert!(ended, "HEADSET_CONNECTION_FAILED should signal session ended");
 
         let mut found_warning = false;
         let mut found_disconnect = false;
@@ -1694,8 +1713,34 @@ mod tests {
                 "message": "Stop all streams"
             }
         });
-        let _responses = handle_message(&msg, &config, &state, &tx).await;
+        let (_responses, ended) = handle_message(&msg, &config, &state, &tx).await;
+        assert!(ended, "CORTEX_STOP_ALL_STREAMS should signal session ended");
         assert!(state.lock().await.session_id.is_empty(), "Session should be cleared");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_close_session_ends_session() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        assert!(!state.lock().await.session_id.is_empty());
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 1,
+                "message": "Session closed"
+            }
+        });
+        let (_responses, ended) = handle_message(&msg, &config, &state, &tx).await;
+        assert!(ended, "CORTEX_CLOSE_SESSION should signal session ended");
+        assert!(state.lock().await.session_id.is_empty(), "Session should be cleared");
+
+        let mut found_disconnect = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, CortexEvent::Disconnected) {
+                found_disconnect = true;
+            }
+        }
+        assert!(found_disconnect, "Expected Disconnected event");
     }
 
     #[tokio::test]
@@ -1709,7 +1754,7 @@ mod tests {
                 "message": "Access granted"
             }
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
         // Already authorized → should NOT produce an authorize request
         assert!(responses.is_empty(), "Should skip re-auth when already authorized");
     }
@@ -1729,7 +1774,7 @@ mod tests {
                 "message": "Access granted"
             }
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
         assert_eq!(responses.len(), 1);
         let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
         assert_eq!(resp["method"], "authorize");
@@ -1746,7 +1791,7 @@ mod tests {
                 "message": {"headsetId": "EPOCX-001"}
             }
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
         assert!(responses.is_empty(), "Should skip query when session already active");
     }
 
@@ -1765,7 +1810,7 @@ mod tests {
                 "message": {"headsetId": "EPOCX-001"}
             }
         });
-        let responses = handle_message(&msg, &config, &state, &tx).await;
+        let (responses, _ended) = handle_message(&msg, &config, &state, &tx).await;
         assert_eq!(responses.len(), 1);
         let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
         assert_eq!(resp["method"], "queryHeadsets");
