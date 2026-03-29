@@ -160,12 +160,12 @@ impl CortexClient {
         let url = self.config.ws_url.clone();
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
-        let ws_tx_arc = Arc::clone(&self.ws_tx);
-
         // Spawn the WebSocket connection task
         tokio::spawn(async move {
-            if let Err(e) = run_ws_loop(url, config, state, event_tx, cmd_rx, ws_tx_arc).await {
+            if let Err(e) = run_ws_loop(url, config, state, event_tx.clone(), cmd_rx).await {
                 warn!("WebSocket loop exited with error: {e}");
+                let _ = event_tx.send(CortexEvent::Error(e.to_string())).await;
+                let _ = event_tx.send(CortexEvent::Disconnected).await;
             }
         });
 
@@ -376,7 +376,6 @@ async fn run_ws_loop(
     state: Arc<Mutex<ClientState>>,
     event_tx: mpsc::Sender<CortexEvent>,
     mut cmd_rx: mpsc::Receiver<String>,
-    _ws_tx_arc: Arc<Mutex<Option<mpsc::Sender<String>>>>,
 ) -> Result<()> {
     info!("Connecting to Cortex service at {url}");
 
@@ -384,12 +383,20 @@ async fn run_ws_loop(
     let tls_connector = build_tls_connector()?;
     let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls_connector));
 
-    let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
+    let (ws_stream, _response) = match tokio_tungstenite::connect_async_tls_with_config(
         &url,
         None,
         false,
         Some(connector),
-    ).await.map_err(|e| anyhow!("WebSocket connection failed: {e}"))?;
+    ).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            let msg = format!("WebSocket connection failed: {e}");
+            warn!("{msg}");
+            // Events are sent by the caller (spawned task) on Err return.
+            return Err(anyhow!("{msg}"));
+        }
+    };
 
     info!("WebSocket connected to {url}");
     let _ = event_tx.send(CortexEvent::Connected).await;
@@ -398,7 +405,8 @@ async fn run_ws_loop(
 
     // Start the authentication flow
     let auth_msg = has_access_right(&config.client_id, &config.client_secret);
-    write.send(Message::Text(auth_msg.to_string().into())).await?;
+    write.send(Message::Text(auth_msg.to_string().into())).await
+        .map_err(|e| anyhow!("Failed to send auth message: {e}"))?;
 
     loop {
         tokio::select! {
@@ -416,7 +424,8 @@ async fn run_ws_loop(
                                     &recv, &config, &state, &event_tx,
                                 ).await;
                                 for resp in responses {
-                                    write.send(Message::Text(resp.into())).await?;
+                                    write.send(Message::Text(resp.into())).await
+                                        .map_err(|e| anyhow!("WebSocket write failed: {e}"))?;
                                 }
                             }
                             Err(e) => {
@@ -450,10 +459,12 @@ async fn run_ws_loop(
                         if config.debug_mode {
                             eprintln!("[emotiv-ws] send: {msg}");
                         }
-                        write.send(Message::Text(msg.into())).await?;
+                        write.send(Message::Text(msg.into())).await
+                            .map_err(|e| anyhow!("WebSocket write failed: {e}"))?;
                     }
                     None => {
                         info!("Command channel closed");
+                        let _ = event_tx.send(CortexEvent::Disconnected).await;
                         break;
                     }
                 }
@@ -1606,6 +1617,179 @@ mod tests {
 
         // No connect/create responses when no headsets
         assert!(responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_headset_disconnected() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 102,
+                "message": {"headsetId": "EPOCX-001"}
+            }
+        });
+        let _responses = handle_message(&msg, &config, &state, &tx).await;
+
+        let mut found_warning = false;
+        let mut found_disconnect = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                CortexEvent::Warning { code, .. } => {
+                    assert_eq!(code, 102);
+                    found_warning = true;
+                }
+                CortexEvent::Disconnected => {
+                    found_disconnect = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_warning, "Expected Warning event");
+        assert!(found_disconnect, "Expected Disconnected event on headset disconnect");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_headset_connection_failed() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 103,
+                "message": "Connection timed out"
+            }
+        });
+        let _responses = handle_message(&msg, &config, &state, &tx).await;
+
+        let mut found_warning = false;
+        let mut found_disconnect = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                CortexEvent::Warning { code, .. } => {
+                    assert_eq!(code, 103);
+                    found_warning = true;
+                }
+                CortexEvent::Disconnected => {
+                    found_disconnect = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_warning, "Expected Warning event");
+        assert!(found_disconnect, "Expected Disconnected event on connection failure");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_stop_all_streams_clears_session() {
+        let (tx, _rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        // Verify session is set before
+        assert!(!state.lock().await.session_id.is_empty());
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 0,
+                "message": "Stop all streams"
+            }
+        });
+        let _responses = handle_message(&msg, &config, &state, &tx).await;
+        assert!(state.lock().await.session_id.is_empty(), "Session should be cleared");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_access_granted_skips_reauth() {
+        let (tx, _rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state(); // already has auth_token
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 9,
+                "message": "Access granted"
+            }
+        });
+        let responses = handle_message(&msg, &config, &state, &tx).await;
+        // Already authorized → should NOT produce an authorize request
+        assert!(responses.is_empty(), "Should skip re-auth when already authorized");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_access_granted_authorizes_when_no_token() {
+        let (tx, _rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = Arc::new(Mutex::new(ClientState {
+            auth_token: String::new(),
+            session_id: String::new(),
+            headset_id: String::new(),
+        }));
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 9,
+                "message": "Access granted"
+            }
+        });
+        let responses = handle_message(&msg, &config, &state, &tx).await;
+        assert_eq!(responses.len(), 1);
+        let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
+        assert_eq!(resp["method"], "authorize");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_headset_connected_skips_when_session_active() {
+        let (tx, _rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state(); // already has session_id
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 104,
+                "message": {"headsetId": "EPOCX-001"}
+            }
+        });
+        let responses = handle_message(&msg, &config, &state, &tx).await;
+        assert!(responses.is_empty(), "Should skip query when session already active");
+    }
+
+    #[tokio::test]
+    async fn test_handle_warning_headset_connected_queries_when_no_session() {
+        let (tx, _rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = Arc::new(Mutex::new(ClientState {
+            auth_token: "tok".into(),
+            session_id: String::new(),
+            headset_id: String::new(),
+        }));
+        let msg = serde_json::json!({
+            "warning": {
+                "code": 104,
+                "message": {"headsetId": "EPOCX-001"}
+            }
+        });
+        let responses = handle_message(&msg, &config, &state, &tx).await;
+        assert_eq!(responses.len(), 1);
+        let resp: serde_json::Value = serde_json::from_str(&responses[0]).unwrap();
+        assert_eq!(resp["method"], "queryHeadsets");
+    }
+
+    #[tokio::test]
+    async fn test_handle_subscribe_failure() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = test_config();
+        let state = test_state();
+        let result = serde_json::json!({
+            "success": [],
+            "failure": [
+                {"streamName": "eeg", "code": -32015, "message": "License expired"}
+            ]
+        });
+        let _responses = handle_result(SUB_REQUEST_ID, &result, &config, &state, &tx).await;
+
+        if let Some(CortexEvent::Error(e)) = rx.recv().await {
+            assert!(e.contains("eeg"), "Error should mention stream name");
+            assert!(e.contains("License expired"), "Error should mention reason");
+        } else {
+            panic!("Expected Error event for subscribe failure");
+        }
     }
 
     #[tokio::test]
