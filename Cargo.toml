@@ -85,7 +85,7 @@ raw      = ["dep:btleplug", "dep:hidapi", "dep:aes", "dep:cipher", "dep:ndarray"
 [dependencies]
 tokio            = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
-rustls            = "0.23"
+rustls            = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde            = { version = "1", features = ["derive"] }
 serde_json       = "1"
 futures-util     = "0.3"
