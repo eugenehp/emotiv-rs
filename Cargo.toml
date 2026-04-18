@@ -1,6 +1,6 @@
 [package]
 name          = "emotiv"
-version       = "0.0.12"
+version       = "0.0.13"
 edition       = "2021"
 rust-version  = "1.75"
 description   = "Async Rust client and TUI for Emotiv EEG headsets via the Cortex API WebSocket (JSON-RPC 2.0)"
@@ -97,7 +97,6 @@ tracing          = "0.1"
 toml             = { version = "0.9", optional = true }
 uuid             = { version = "1", features = ["v4"] }
 chrono           = { version = "0.4", features = ["serde"] }
-rand             = "0.8"
 
 # Optional TUI dependencies
 ratatui   = { version = "0.30.0", features = ["crossterm"], optional = true }
